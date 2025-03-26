@@ -77,14 +77,18 @@ func (m *MaintenanceCheck) isMaintenanceMode() bool {
 	defer resp.Body.Close()
 
 	var result struct {
-		Maintenance bool `json:"maintenance"`
+		SystemConfig struct {
+			Maintenance struct {
+				IsActive bool `json:"is_active"`
+			} `json:"maintenance"`
+		} `json:"system_config"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		log.Printf("Failed to decode maintenance status: %v", err)
 		return false
 	}
 
-	m.cache.value = result.Maintenance
+	m.cache.value = result.SystemConfig.Maintenance.IsActive
 	m.cache.expiry = time.Now().Add(m.cacheDuration)
-	return result.Maintenance
+	return result.SystemConfig.Maintenance.IsActive
 }

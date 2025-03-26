@@ -32,11 +32,15 @@ The plugin expects your maintenance status endpoint to return a JSON response in
 
 ```json
 {
-  "maintenance": true
+  "system_config": {
+    "maintenance": {
+      "is_active": false
+    }
+  }
 }
 ```
 
-When `maintenance` is `true`, the middleware will return a 512 status code with the message "Service is in maintenance mode".
+When `maintenance.is_active` is `true`, the middleware will return a 512 status code with the message "Service is in maintenance mode".
 
 ## Parameters
 
