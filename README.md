@@ -10,7 +10,7 @@ A Traefik middleware plugin that checks if a service is in maintenance mode and 
 experimental:
   plugins:
     maintenance:
-      moduleName: "github.com/alex/traefik-maintenance-plugin"
+      moduleName: "github.com/CitronusAcademy/traefik-maintenance-plugin"
       version: "v0.1.0"
 ```
 
@@ -55,3 +55,5 @@ experimental:
   plugins:
     maintenanceCheck:
       moduleName: github.com/CitronusAcademy/traefik-maintenance-plugin
+      version: "v0.1.0"
+```
