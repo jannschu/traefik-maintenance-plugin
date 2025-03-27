@@ -1,3 +1,3 @@
 module github.com/CitronusAcademy/traefik-maintenance-plugin
 
-go 1.23.2
+go 1.22.0
