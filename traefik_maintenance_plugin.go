@@ -12,14 +12,14 @@ import (
 
 // Config holds the plugin configuration
 type Config struct {
-	Endpoint      string        `json:"endpoint,omitempty"`
-	CacheDuration time.Duration `json:"cacheDuration,omitempty"`
+	Endpoint      string `json:"endpoint,omitempty"`
+	CacheDuration string `json:"cacheDuration,omitempty"`
 }
 
 // CreateConfig creates a default config
 func CreateConfig() *Config {
 	return &Config{
-		CacheDuration: 10 * time.Second, // Default cache duration
+		CacheDuration: "10s", // Default cache duration
 	}
 }
 
@@ -41,10 +41,16 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 		return nil, errors.New("endpoint is required")
 	}
 
+	// Parse cache duration
+	cacheDuration, err := time.ParseDuration(config.CacheDuration)
+	if err != nil {
+		cacheDuration = 10 * time.Second
+	}
+
 	return &MaintenanceCheck{
 		next:          next,
 		endpoint:      config.Endpoint,
-		cacheDuration: config.CacheDuration,
+		cacheDuration: cacheDuration,
 	}, nil
 }
 

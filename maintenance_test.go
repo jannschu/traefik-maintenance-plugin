@@ -1,12 +1,13 @@
 package traefik_maintenance_plugin_test
 
+// go test -v
+
 import (
 	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
-	"time"
 
 	plugin "github.com/CitronusAcademy/traefik-maintenance-plugin"
 )
@@ -38,19 +39,19 @@ func TestMaintenanceCheck(t *testing.T) {
 	tests := []struct {
 		name          string
 		endpoint      string
-		cacheDuration time.Duration
+		cacheDuration string
 		expectedCode  int
 	}{
 		{
 			name:          "Maintenance inactive",
 			endpoint:      ts.URL,
-			cacheDuration: 10 * time.Second,
+			cacheDuration: "10s",
 			expectedCode:  http.StatusOK,
 		},
 		{
 			name:          "Maintenance active",
 			endpoint:      ts.URL + "/maintenance-active",
-			cacheDuration: 10 * time.Second,
+			cacheDuration: "10s",
 			expectedCode:  512, // Custom maintenance status code
 		},
 	}

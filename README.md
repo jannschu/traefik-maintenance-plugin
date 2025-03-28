@@ -45,7 +45,7 @@ When `maintenance.is_active` is `true`, the middleware will return a 512 status 
 ## Parameters
 
 - `endpoint` (required): URL to check maintenance status
-- `cacheDuration` (optional): How long to cache maintenance status, default is 10 seconds
+- `cacheDuration` (optional): How long to cache maintenance status, specified as a string duration (e.g., "10s", "1m", "5m"). Default is "10s".
 
 ## Установка
 
