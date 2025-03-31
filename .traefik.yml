@@ -7,5 +7,5 @@ import: github.com/CitronusAcademy/traefik-maintenance-plugin
 summary: A middleware that checks if a service is in maintenance mode and returns a 512 status code if it is
 
 testData:
-  endpoint: "https://api.citronus.world/admin/api/system-config/"
-  cacheDuration: "10s"
+  endpoint: 'https://api.citronus.world/admin/api/system-config/'
+  cacheDuration: '10s'
