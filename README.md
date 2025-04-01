@@ -23,7 +23,7 @@ http:
       plugin:
         maintenance:
           endpoint: "https://example.com/maintenance-status"
-          cacheDuration: "10s"
+          cacheDuration: 10
 ```
 
 ## Endpoint Format
@@ -34,18 +34,31 @@ The plugin expects your maintenance status endpoint to return a JSON response in
 {
   "system_config": {
     "maintenance": {
-      "is_active": false
+      "is_active": false,
+      "whitelist": [
+        "192.168.1.1",
+        "10.0.0.5"
+      ]
     }
   }
 }
 ```
 
-When `maintenance.is_active` is `true`, the middleware will return a 512 status code with the message "Service is in maintenance mode".
+When `maintenance.is_active` is `true`, the middleware will check the whitelist:
+
+1. If the whitelist contains `"*"`, all users will be allowed to access the service.
+2. If the client's IP address matches any entry in the whitelist, they will be allowed through.
+3. Otherwise, a 512 status code with the message "Service is in maintenance mode" will be returned.
+
+The plugin extracts client IPs by checking headers in the following order:
+1. X-Forwarded-For (first IP if multiple are present)
+2. X-Real-IP
+3. Request's RemoteAddr
 
 ## Parameters
 
 - `endpoint` (required): URL to check maintenance status
-- `cacheDuration` (optional): How long to cache maintenance status, specified as a string duration (e.g., "10s", "1m", "5m"). Default is "10s".
+- `cacheDuration` (optional): How long to cache maintenance status, specified in seconds as an integer value. Default is 10.
 
 ## Установка
 
