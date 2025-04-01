@@ -67,12 +67,17 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 func (m *MaintenanceCheck) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	isActive, whitelist := m.getMaintenanceStatus()
 
+	log.Printf("Maintenance check: isActive=%v, whitelist=%v, URI=%s, Host=%s",
+		isActive, whitelist, req.RequestURI, req.Host)
+
 	// If maintenance mode is active, check whitelist
 	if isActive {
+		log.Printf("Maintenance mode is active for request %s", req.URL.String())
 		// Check if the whitelist contains a wildcard "*"
 		for _, entry := range whitelist {
 			if entry == "*" {
 				// Allow all users if "*" is in whitelist
+				log.Printf("Wildcard entry found in whitelist, allowing request")
 				m.next.ServeHTTP(rw, req)
 				return
 			}
@@ -80,12 +85,17 @@ func (m *MaintenanceCheck) ServeHTTP(rw http.ResponseWriter, req *http.Request) 
 
 		// Get client IP address
 		clientIP := getClientIP(req)
+		log.Printf("Client IP: %s", clientIP)
 
 		// Check if client IP is in whitelist
 		if !isIPWhitelisted(clientIP, whitelist) {
+			log.Printf("Client IP %s is not in whitelist, blocking request", clientIP)
 			http.Error(rw, "Service is in maintenance mode", 512)
 			return
 		}
+		log.Printf("Client IP %s is in whitelist, allowing request", clientIP)
+	} else {
+		log.Printf("Maintenance mode is NOT active, allowing request to %s", req.URL.String())
 	}
 
 	m.next.ServeHTTP(rw, req)
@@ -96,6 +106,8 @@ func (m *MaintenanceCheck) getMaintenanceStatus() (bool, []string) {
 	m.cache.mutex.RLock()
 	if time.Now().Before(m.cache.expiry) {
 		defer m.cache.mutex.RUnlock()
+		log.Printf("Using cached maintenance status: isActive=%v, whitelist=%v",
+			m.cache.isActive, m.cache.whitelist)
 		return m.cache.isActive, m.cache.whitelist
 	}
 	m.cache.mutex.RUnlock()
@@ -103,6 +115,7 @@ func (m *MaintenanceCheck) getMaintenanceStatus() (bool, []string) {
 	m.cache.mutex.Lock()
 	defer m.cache.mutex.Unlock()
 
+	log.Printf("Fetching maintenance status from %s", m.endpoint)
 	resp, err := http.Get(m.endpoint)
 	if err != nil {
 		log.Printf("Failed to fetch maintenance status: %v", err)
@@ -110,11 +123,17 @@ func (m *MaintenanceCheck) getMaintenanceStatus() (bool, []string) {
 	}
 	defer resp.Body.Close()
 
+	log.Printf("Maintenance API response status: %d", resp.StatusCode)
+
 	var result MaintenanceResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		log.Printf("Failed to decode maintenance status: %v", err)
 		return false, nil
 	}
+
+	log.Printf("Received maintenance status: isActive=%v, whitelist=%v",
+		result.SystemConfig.Maintenance.IsActive,
+		result.SystemConfig.Maintenance.Whitelist)
 
 	m.cache.isActive = result.SystemConfig.Maintenance.IsActive
 	m.cache.whitelist = result.SystemConfig.Maintenance.Whitelist
