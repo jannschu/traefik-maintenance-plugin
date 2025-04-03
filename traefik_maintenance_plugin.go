@@ -4,23 +4,30 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 // Config holds the plugin configuration
 type Config struct {
-	Endpoint      string `json:"endpoint,omitempty"`
-	CacheDuration int    `json:"cacheDuration,omitempty"`
+	Endpoint                string   `json:"endpoint,omitempty"`
+	CacheDurationInSeconds  int      `json:"cacheDurationInSeconds,omitempty"`
+	SkipPrefixes            []string `json:"skipPrefixes,omitempty"`
+	RequestTimeoutInSeconds int      `json:"requestTimeoutInSeconds,omitempty"`
+	MaintenanceStatusCode   int      `json:"maintenanceStatusCode,omitempty"`
 }
 
 // CreateConfig creates a default config
 func CreateConfig() *Config {
 	return &Config{
-		CacheDuration: 10, // Default cache duration in seconds
+		CacheDurationInSeconds:  10,
+		SkipPrefixes:            []string{},
+		RequestTimeoutInSeconds: 5,
+		MaintenanceStatusCode:   512,
 	}
 }
 
@@ -36,15 +43,20 @@ type MaintenanceResponse struct {
 
 // MaintenanceCheck is a Traefik middleware plugin
 type MaintenanceCheck struct {
-	next          http.Handler
-	endpoint      string
-	cacheDuration time.Duration
-	cache         struct {
+	next                  http.Handler
+	endpoint              string
+	cacheDuration         time.Duration
+	requestTimeout        time.Duration
+	skipPrefixes          []string
+	client                *http.Client
+	maintenanceStatusCode int
+	cache                 struct {
 		mutex     sync.RWMutex
 		isActive  bool
 		whitelist []string
 		expiry    time.Time
 	}
+	inProgress int32 // Atomic flag to prevent multiple concurrent API calls
 }
 
 // New creates a new MaintenanceCheck middleware
@@ -53,49 +65,76 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 		return nil, errors.New("endpoint is required")
 	}
 
-	// Convert seconds to duration
-	cacheDuration := time.Duration(config.CacheDuration) * time.Second
+	cacheDuration := time.Duration(config.CacheDurationInSeconds) * time.Second
+	requestTimeout := time.Duration(config.RequestTimeoutInSeconds) * time.Second
 
-	return &MaintenanceCheck{
-		next:          next,
-		endpoint:      config.Endpoint,
-		cacheDuration: cacheDuration,
-	}, nil
+	userAgent := fmt.Sprintf("TraefikMaintenancePlugin/%s", name)
+
+	transport := &http.Transport{
+		MaxIdleConnsPerHost: 10,
+		IdleConnTimeout:     30 * time.Second,
+		DisableCompression:  true,
+	}
+
+	client := &http.Client{
+		Timeout:   requestTimeout,
+		Transport: transport,
+	}
+
+	m := &MaintenanceCheck{
+		next:                  next,
+		endpoint:              config.Endpoint,
+		cacheDuration:         cacheDuration,
+		requestTimeout:        requestTimeout,
+		skipPrefixes:          config.SkipPrefixes,
+		client:                client,
+		maintenanceStatusCode: config.MaintenanceStatusCode,
+	}
+
+	m.cache.isActive = false
+	m.cache.whitelist = []string{}
+	m.cache.expiry = time.Now()
+
+	// Make initial request to warm up cache
+	go func() {
+		reqCtx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+		defer cancel()
+
+		req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, config.Endpoint, nil)
+		if err == nil {
+			req.Header.Set("User-Agent", userAgent)
+			_, _ = m.client.Do(req) // Ignore errors, just trying to warm up cache
+		}
+	}()
+
+	return m, nil
 }
 
 // ServeHTTP processes incoming requests
 func (m *MaintenanceCheck) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
+	for _, prefix := range m.skipPrefixes {
+		if strings.HasPrefix(req.URL.Path, prefix) {
+			m.next.ServeHTTP(rw, req)
+			return
+		}
+	}
+
 	isActive, whitelist := m.getMaintenanceStatus()
 
-	log.Printf("Maintenance check: isActive=%v, whitelist=%v, URI=%s, Host=%s",
-		isActive, whitelist, req.RequestURI, req.Host)
-
-	// If maintenance mode is active, check whitelist
 	if isActive {
-		log.Printf("Maintenance mode is active for request %s", req.URL.String())
-		// Check if the whitelist contains a wildcard "*"
 		for _, entry := range whitelist {
 			if entry == "*" {
-				// Allow all users if "*" is in whitelist
-				log.Printf("Wildcard entry found in whitelist, allowing request")
 				m.next.ServeHTTP(rw, req)
 				return
 			}
 		}
 
-		// Get client IP address
 		clientIP := getClientIP(req)
-		log.Printf("Client IP: %s", clientIP)
 
-		// Check if client IP is in whitelist
 		if !isIPWhitelisted(clientIP, whitelist) {
-			log.Printf("Client IP %s is not in whitelist, blocking request", clientIP)
-			http.Error(rw, "Service is in maintenance mode", 512)
+			http.Error(rw, "Service is in maintenance mode", m.maintenanceStatusCode)
 			return
 		}
-		log.Printf("Client IP %s is in whitelist, allowing request", clientIP)
-	} else {
-		log.Printf("Maintenance mode is NOT active, allowing request to %s", req.URL.String())
 	}
 
 	m.next.ServeHTTP(rw, req)
@@ -106,34 +145,53 @@ func (m *MaintenanceCheck) getMaintenanceStatus() (bool, []string) {
 	m.cache.mutex.RLock()
 	if time.Now().Before(m.cache.expiry) {
 		defer m.cache.mutex.RUnlock()
-		log.Printf("Using cached maintenance status: isActive=%v, whitelist=%v",
-			m.cache.isActive, m.cache.whitelist)
 		return m.cache.isActive, m.cache.whitelist
 	}
 	m.cache.mutex.RUnlock()
 
+	if !atomic.CompareAndSwapInt32(&m.inProgress, 0, 1) {
+		m.cache.mutex.RLock()
+		defer m.cache.mutex.RUnlock()
+		return m.cache.isActive, m.cache.whitelist
+	}
+
+	defer atomic.StoreInt32(&m.inProgress, 0)
+
 	m.cache.mutex.Lock()
 	defer m.cache.mutex.Unlock()
 
-	log.Printf("Fetching maintenance status from %s", m.endpoint)
-	resp, err := http.Get(m.endpoint)
+	if time.Now().Before(m.cache.expiry) {
+		return m.cache.isActive, m.cache.whitelist
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), m.requestTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, m.endpoint, nil)
 	if err != nil {
-		log.Printf("Failed to fetch maintenance status: %v", err)
-		return false, nil // Default to allowing traffic in case of failure
+		m.cache.expiry = time.Now().Add(m.cacheDuration / 2)
+		return m.cache.isActive, m.cache.whitelist
+	}
+
+	req.Header.Set("User-Agent", "TraefikMaintenancePlugin")
+
+	resp, err := m.client.Do(req)
+	if err != nil {
+		m.cache.expiry = time.Now().Add(m.cacheDuration / 2)
+		return m.cache.isActive, m.cache.whitelist
 	}
 	defer resp.Body.Close()
 
-	log.Printf("Maintenance API response status: %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		m.cache.expiry = time.Now().Add(m.cacheDuration / 2)
+		return m.cache.isActive, m.cache.whitelist
+	}
 
 	var result MaintenanceResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		log.Printf("Failed to decode maintenance status: %v", err)
-		return false, nil
+		m.cache.expiry = time.Now().Add(m.cacheDuration / 2)
+		return m.cache.isActive, m.cache.whitelist
 	}
-
-	log.Printf("Received maintenance status: isActive=%v, whitelist=%v",
-		result.SystemConfig.Maintenance.IsActive,
-		result.SystemConfig.Maintenance.Whitelist)
 
 	m.cache.isActive = result.SystemConfig.Maintenance.IsActive
 	m.cache.whitelist = result.SystemConfig.Maintenance.Whitelist
@@ -144,27 +202,29 @@ func (m *MaintenanceCheck) getMaintenanceStatus() (bool, []string) {
 
 // getClientIP extracts the client IP address from the request
 func getClientIP(req *http.Request) string {
-	// Check X-Forwarded-For header first
-	xForwardedFor := req.Header.Get("X-Forwarded-For")
-	if xForwardedFor != "" {
-		// X-Forwarded-For can contain multiple IPs, get the first one
-		ips := strings.Split(xForwardedFor, ",")
-		if len(ips) > 0 {
-			return strings.TrimSpace(ips[0])
+	for _, h := range []string{"X-Forwarded-For", "X-Real-Ip"} {
+		addresses := req.Header.Get(h)
+		if addresses != "" {
+			parts := strings.Split(addresses, ",")
+			if len(parts) > 0 {
+				return strings.TrimSpace(parts[0])
+			}
 		}
 	}
 
-	// Check X-Real-IP header
-	if ip := req.Header.Get("X-Real-IP"); ip != "" {
-		return ip
+	ip := req.RemoteAddr
+	if idx := strings.LastIndex(ip, ":"); idx != -1 {
+		ip = ip[:idx]
 	}
-
-	// Fall back to RemoteAddr
-	return strings.Split(req.RemoteAddr, ":")[0]
+	return ip
 }
 
 // isIPWhitelisted checks if the client IP is in the whitelist
 func isIPWhitelisted(clientIP string, whitelist []string) bool {
+	if len(whitelist) == 0 {
+		return false
+	}
+
 	for _, ip := range whitelist {
 		if ip == clientIP {
 			return true

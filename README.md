@@ -1,6 +1,6 @@
 # Traefik Maintenance Plugin
 
-A simple middleware plugin for Traefik that checks for maintenance status from an API and blocks requests if maintenance is active.
+A robust middleware plugin for Traefik that checks for maintenance status from an API and blocks requests if maintenance is active.
 
 ## Features
 
@@ -8,6 +8,11 @@ A simple middleware plugin for Traefik that checks for maintenance status from a
 - Caches the maintenance status for a configurable duration
 - Allows specific IP addresses to bypass maintenance mode
 - Supports a wildcard (`*`) for allowing all traffic during maintenance
+- Allows specific URL prefixes to bypass maintenance checks
+- Configurable request timeout for maintenance status API 
+- Thread-safe implementation to handle concurrent requests
+- Customizable maintenance status code
+- Automatic cache warmup
 
 ## Usage
 
@@ -23,7 +28,12 @@ spec:
   plugin:
     maintenanceCheck:
       endpoint: http://your-maintenance-api-service/maintenance
-      cacheDuration: 60  # in seconds
+      cacheDurationInSeconds: 60
+      requestTimeoutInSeconds: 5
+      skipPrefixes:      # optional URL prefixes to bypass maintenance checks
+        - /admin
+        - /pgadmin
+      maintenanceStatusCode: 512  # HTTP status code when in maintenance
 ```
 
 ### API Format
@@ -75,7 +85,12 @@ http:
       plugin:
         maintenance:
           endpoint: "https://example.com/maintenance-status"
-          cacheDuration: 10
+          cacheDurationInSeconds: 10
+          requestTimeoutInSeconds: 5
+          skipPrefixes:
+            - "/admin"
+            - "/pgadmin"
+          maintenanceStatusCode: 512
 ```
 
 ## Endpoint Format
@@ -100,7 +115,7 @@ When `maintenance.is_active` is `true`, the middleware will check the whitelist:
 
 1. If the whitelist contains `"*"`, all users will be allowed to access the service.
 2. If the client's IP address matches any entry in the whitelist, they will be allowed through.
-3. Otherwise, a 512 status code with the message "Service is in maintenance mode" will be returned.
+3. Otherwise, the configured maintenance status code (default: 512) with the message "Service is in maintenance mode" will be returned.
 
 The plugin extracts client IPs by checking headers in the following order:
 1. X-Forwarded-For (first IP if multiple are present)
@@ -110,11 +125,25 @@ The plugin extracts client IPs by checking headers in the following order:
 ## Parameters
 
 - `endpoint` (required): URL to check maintenance status
-- `cacheDuration` (optional): How long to cache maintenance status, specified in seconds as an integer value. Default is 10.
+- `cacheDurationInSeconds` (optional): How long to cache maintenance status, specified in seconds. Default is 10.
+- `requestTimeoutInSeconds` (optional): Timeout for API requests in seconds. Default is 5.
+- `skipPrefixes` (optional): List of URL path prefixes that should bypass maintenance checks, useful for admin interfaces. Default is empty list.
+- `maintenanceStatusCode` (optional): HTTP status code to return when in maintenance mode. Default is 512 (Service Unavailable).
 
-## Установка
+## Production Readiness Features
 
-Добавьте плагин в `traefik_values.yaml`:
+- **Concurrency handling**: The plugin correctly handles simultaneous requests using atomic operations and locks to prevent thundering herd problems
+- **Error resilience**: If the maintenance API is unavailable or returns errors, the plugin gracefully falls back to cached values
+- **Timeout handling**: Configurable timeout for maintenance API requests prevents service degradation due to slow APIs
+- **Cache invalidation**: Maintenance status is automatically refreshed after the configured duration has elapsed
+- **Performance optimization**: The plugin uses read locks when possible to maximize throughput
+- **Cache warmup**: Makes an initial request at startup to populate the cache and avoid a request spike on first use
+- **HTTP transport tuning**: Optimized HTTP client with connection pooling and proper timeouts
+- **Standard HTTP status code**: Uses the proper 512 Service Unavailable status code by default (customizable)
+
+## Installation
+
+Add the plugin to `traefik_values.yaml`:
 ```yaml
 experimental:
   plugins:
