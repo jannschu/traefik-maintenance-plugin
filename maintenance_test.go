@@ -69,6 +69,8 @@ func TestMaintenanceCheck(t *testing.T) {
 		clientIP                string
 		urlPath                 string
 		skipPrefixes            []string
+		skipHosts               []string
+		host                    string
 		maintenanceStatusCode   int
 		expectedCode            int
 		description             string
@@ -81,6 +83,7 @@ func TestMaintenanceCheck(t *testing.T) {
 			clientIP:                "10.0.0.1",
 			urlPath:                 "/",
 			skipPrefixes:            []string{},
+			skipHosts:               []string{},
 			maintenanceStatusCode:   512,
 			expectedCode:            http.StatusOK,
 			description:             "When maintenance is inactive, all requests should be allowed",
@@ -93,6 +96,7 @@ func TestMaintenanceCheck(t *testing.T) {
 			clientIP:                "10.0.0.1",
 			urlPath:                 "/",
 			skipPrefixes:            []string{},
+			skipHosts:               []string{},
 			maintenanceStatusCode:   512,
 			expectedCode:            512,
 			description:             "When maintenance is active with no whitelist, all requests should be blocked",
@@ -105,6 +109,7 @@ func TestMaintenanceCheck(t *testing.T) {
 			clientIP:                "10.0.0.1",
 			urlPath:                 "/",
 			skipPrefixes:            []string{},
+			skipHosts:               []string{},
 			maintenanceStatusCode:   418, // I'm a teapot
 			expectedCode:            418,
 			description:             "Should use custom status code when specified",
@@ -117,6 +122,7 @@ func TestMaintenanceCheck(t *testing.T) {
 			clientIP:                "10.0.0.1",
 			urlPath:                 "/",
 			skipPrefixes:            []string{},
+			skipHosts:               []string{},
 			maintenanceStatusCode:   512,
 			expectedCode:            512,
 			description:             "When maintenance is active and client IP is not in whitelist, request should be blocked",
@@ -129,6 +135,7 @@ func TestMaintenanceCheck(t *testing.T) {
 			clientIP:                "192.168.1.1",
 			urlPath:                 "/",
 			skipPrefixes:            []string{},
+			skipHosts:               []string{},
 			maintenanceStatusCode:   512,
 			expectedCode:            http.StatusOK,
 			description:             "When maintenance is active and client IP is in whitelist, request should be allowed",
@@ -141,6 +148,7 @@ func TestMaintenanceCheck(t *testing.T) {
 			clientIP:                "10.0.0.1",
 			urlPath:                 "/",
 			skipPrefixes:            []string{},
+			skipHosts:               []string{},
 			maintenanceStatusCode:   512,
 			expectedCode:            http.StatusOK,
 			description:             "When maintenance is active with wildcard whitelist, all requests should be allowed",
@@ -153,6 +161,7 @@ func TestMaintenanceCheck(t *testing.T) {
 			clientIP:                "10.0.0.1",
 			urlPath:                 "/admin/dashboard",
 			skipPrefixes:            []string{"/admin"},
+			skipHosts:               []string{},
 			maintenanceStatusCode:   512,
 			expectedCode:            http.StatusOK,
 			description:             "When maintenance is active but URL matches skip prefix, request should be allowed",
@@ -165,6 +174,7 @@ func TestMaintenanceCheck(t *testing.T) {
 			clientIP:                "10.0.0.1",
 			urlPath:                 "/pgadmin/login",
 			skipPrefixes:            []string{"/admin", "/pgadmin"},
+			skipHosts:               []string{},
 			maintenanceStatusCode:   512,
 			expectedCode:            http.StatusOK,
 			description:             "When maintenance is active but URL matches one of multiple skip prefixes, request should be allowed",
@@ -177,9 +187,52 @@ func TestMaintenanceCheck(t *testing.T) {
 			clientIP:                "10.0.0.1",
 			urlPath:                 "/app/user/profile",
 			skipPrefixes:            []string{"/admin", "/pgadmin"},
+			skipHosts:               []string{},
 			maintenanceStatusCode:   512,
 			expectedCode:            512,
 			description:             "When maintenance is active and URL doesn't match any skip prefix, request should be blocked",
+		},
+		{
+			name:                    "Maintenance active - skip host",
+			endpoint:                activeEndpoint,
+			cacheDurationInSeconds:  10,
+			requestTimeoutInSeconds: 5,
+			clientIP:                "10.0.0.1",
+			urlPath:                 "/",
+			skipPrefixes:            []string{},
+			skipHosts:               []string{"test.example.com"},
+			host:                    "test.example.com",
+			maintenanceStatusCode:   512,
+			expectedCode:            http.StatusOK,
+			description:             "When maintenance is active but host matches skip host, request should be allowed",
+		},
+		{
+			name:                    "Maintenance active - skip host with port",
+			endpoint:                activeEndpoint,
+			cacheDurationInSeconds:  10,
+			requestTimeoutInSeconds: 5,
+			clientIP:                "10.0.0.1",
+			urlPath:                 "/",
+			skipPrefixes:            []string{},
+			skipHosts:               []string{"test.example.com"},
+			host:                    "test.example.com:8080",
+			maintenanceStatusCode:   512,
+			expectedCode:            http.StatusOK,
+			description:             "When maintenance is active but host with port matches skip host, request should be allowed",
+		},
+		{
+			name:                    "Maintenance active - wildcard host match",
+			endpoint:                activeEndpoint,
+			cacheDurationInSeconds:  10,
+			requestTimeoutInSeconds: 5,
+			clientIP:                "10.0.0.1",
+			urlPath:                 "/",
+			skipPrefixes:            []string{},
+			skipHosts:               []string{"*.example.com"},
+			host:                    "sub.example.com",
+			maintenanceStatusCode:   512,
+			expectedCode:            http.StatusOK,
+			description:             "When maintenance is active but host matches wildcard skip host, request should be allowed",
 		},
 	}
 
@@ -190,6 +243,7 @@ func TestMaintenanceCheck(t *testing.T) {
 			cfg.CacheDurationInSeconds = tt.cacheDurationInSeconds
 			cfg.RequestTimeoutInSeconds = tt.requestTimeoutInSeconds
 			cfg.SkipPrefixes = tt.skipPrefixes
+			cfg.SkipHosts = tt.skipHosts
 			cfg.MaintenanceStatusCode = tt.maintenanceStatusCode
 
 			next := http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
@@ -206,6 +260,10 @@ func TestMaintenanceCheck(t *testing.T) {
 			if tt.clientIP != "" {
 				req.Header.Set("X-Forwarded-For", tt.clientIP)
 				req.Header.Set("X-Real-IP", tt.clientIP)
+			}
+
+			if tt.host != "" {
+				req.Host = tt.host
 			}
 
 			recorder := httptest.NewRecorder()
@@ -349,7 +407,6 @@ func TestCacheWarmup(t *testing.T) {
 		t.Fatalf("Error creating plugin: %v", err)
 	}
 
-	// Give a little time for the goroutine to execute the cache warmup
 	time.Sleep(10 * time.Millisecond)
 }
 

@@ -33,7 +33,12 @@ spec:
       skipPrefixes:      # optional URL prefixes to bypass maintenance checks
         - /admin
         - /pgadmin
+      skipHosts:         # optional hostnames to bypass maintenance checks
+        - admin.example.com
+        - monitoring.example.com
+        - *.internal.example.com
       maintenanceStatusCode: 512  # HTTP status code when in maintenance
+      debug: false       # set to true to enable detailed logging
 ```
 
 ### API Format
@@ -91,6 +96,7 @@ http:
             - "/admin"
             - "/pgadmin"
           maintenanceStatusCode: 512
+          debug: false
 ```
 
 ## Endpoint Format
@@ -129,6 +135,8 @@ The plugin extracts client IPs by checking headers in the following order:
 - `requestTimeoutInSeconds` (optional): Timeout for API requests in seconds. Default is 5.
 - `skipPrefixes` (optional): List of URL path prefixes that should bypass maintenance checks, useful for admin interfaces. Default is empty list.
 - `maintenanceStatusCode` (optional): HTTP status code to return when in maintenance mode. Default is 512 (Service Unavailable).
+- `skipHosts` (optional): List of hostnames that should bypass maintenance checks, useful for admin interfaces, monitoring tools, etc. Supports wildcard patterns like "*.example.com". Default is empty list.
+- `debug` (optional): Enable debug logging for troubleshooting. Default is false. When enabled, detailed information about decision making will be logged to stdout.
 
 ## Production Readiness Features
 
