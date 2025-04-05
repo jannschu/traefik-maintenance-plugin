@@ -9,7 +9,6 @@ import (
 	"os"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -60,7 +59,7 @@ type MaintenanceCheck struct {
 		whitelist []string
 		expiry    time.Time
 	}
-	inProgress int32 // Atomic flag to prevent multiple concurrent API calls
+	stopCh chan struct{}
 }
 
 func New(ctx context.Context, next http.Handler, config *Config, name string) (http.Handler, error) {
@@ -95,63 +94,23 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 		maintenanceStatusCode: config.MaintenanceStatusCode,
 		debug:                 config.Debug,
 		userAgent:             userAgent,
+		stopCh:                make(chan struct{}),
 	}
 
 	m.cache.isActive = false
 	m.cache.whitelist = []string{}
 	m.cache.expiry = time.Now()
 
-	// Make initial request to warm up cache
+	go m.startBackgroundRefresher()
+
+	m.refreshMaintenanceStatus()
+
 	go func() {
-		time.Sleep(100 * time.Millisecond)
-
-		reqCtx, cancel := context.WithTimeout(context.Background(), requestTimeout)
-		defer cancel()
-
-		req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, config.Endpoint, nil)
-		if err != nil {
-			if config.Debug {
-				fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Cache warmup: Error creating request: %v\n", err)
-			}
-			return
+		<-ctx.Done()
+		if m.debug {
+			fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Context cancelled, cleaning up resources\n")
 		}
-
-		req.Header.Set("User-Agent", userAgent)
-
-		resp, err := client.Do(req)
-		if err != nil {
-			if config.Debug {
-				fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Cache warmup: Error making request: %v\n", err)
-			}
-			return
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			if config.Debug {
-				fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Cache warmup: API returned status code: %d\n", resp.StatusCode)
-			}
-			return
-		}
-
-		var result MaintenanceResponse
-		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-			if config.Debug {
-				fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Cache warmup: Error parsing JSON: %v\n", err)
-			}
-			return
-		}
-
-		m.cache.mutex.Lock()
-		m.cache.isActive = result.SystemConfig.Maintenance.IsActive
-		m.cache.whitelist = result.SystemConfig.Maintenance.Whitelist
-		m.cache.expiry = time.Now().Add(cacheDuration)
-		m.cache.mutex.Unlock()
-
-		if config.Debug {
-			fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Cache warmup completed successfully: active=%v, whitelist count=%d\n",
-				result.SystemConfig.Maintenance.IsActive, len(result.SystemConfig.Maintenance.Whitelist))
-		}
+		m.Close()
 	}()
 
 	return m, nil
@@ -215,37 +174,17 @@ func (m *MaintenanceCheck) ServeHTTP(rw http.ResponseWriter, req *http.Request) 
 
 func (m *MaintenanceCheck) getMaintenanceStatus() (bool, []string) {
 	m.cache.mutex.RLock()
-	if time.Now().Before(m.cache.expiry) {
-		defer m.cache.mutex.RUnlock()
-		if m.debug {
-			fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Using cached status (valid): active=%v, whitelist count=%d\n",
-				m.cache.isActive, len(m.cache.whitelist))
-		}
-		return m.cache.isActive, m.cache.whitelist
-	}
-	m.cache.mutex.RUnlock()
+	defer m.cache.mutex.RUnlock()
 
-	if !atomic.CompareAndSwapInt32(&m.inProgress, 0, 1) {
-		m.cache.mutex.RLock()
-		defer m.cache.mutex.RUnlock()
-		if m.debug {
-			fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Another request is fetching status, using cached values\n")
-		}
-		return m.cache.isActive, m.cache.whitelist
+	if m.debug {
+		fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Using cached status: active=%v, whitelist count=%d\n",
+			m.cache.isActive, len(m.cache.whitelist))
 	}
 
-	defer atomic.StoreInt32(&m.inProgress, 0)
+	return m.cache.isActive, m.cache.whitelist
+}
 
-	m.cache.mutex.Lock()
-	defer m.cache.mutex.Unlock()
-
-	if time.Now().Before(m.cache.expiry) {
-		if m.debug {
-			fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Cache was updated by another goroutine while waiting for lock, using fresh values\n")
-		}
-		return m.cache.isActive, m.cache.whitelist
-	}
-
+func (m *MaintenanceCheck) fetchMaintenanceStatus() (bool, []string, error) {
 	if m.debug {
 		fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Fetching maintenance status from '%s'\n", m.endpoint)
 	}
@@ -255,52 +194,40 @@ func (m *MaintenanceCheck) getMaintenanceStatus() (bool, []string) {
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, m.endpoint, nil)
 	if err != nil {
-		m.cache.expiry = time.Now().Add(m.cacheDuration / 2)
 		if m.debug {
 			fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Error creating request: %v\n", err)
 		}
-		return m.cache.isActive, m.cache.whitelist
+		return false, nil, err
 	}
 
 	req.Header.Set("User-Agent", m.userAgent)
 
 	resp, err := m.client.Do(req)
 	if err != nil {
-		m.cache.expiry = time.Now().Add(m.cacheDuration / 2)
 		if m.debug {
 			fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Error making request: %v\n", err)
 		}
-		return m.cache.isActive, m.cache.whitelist
+		return false, nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		m.cache.expiry = time.Now().Add(m.cacheDuration / 2)
+		err = fmt.Errorf("API returned status code: %d", resp.StatusCode)
 		if m.debug {
-			fmt.Fprintf(os.Stdout, "[MaintenanceCheck] API returned status code: %d\n", resp.StatusCode)
+			fmt.Fprintf(os.Stdout, "[MaintenanceCheck] %v\n", err)
 		}
-		return m.cache.isActive, m.cache.whitelist
+		return false, nil, err
 	}
 
 	var result MaintenanceResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		m.cache.expiry = time.Now().Add(m.cacheDuration / 2)
 		if m.debug {
 			fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Error parsing JSON: %v\n", err)
 		}
-		return m.cache.isActive, m.cache.whitelist
+		return false, nil, err
 	}
 
-	m.cache.isActive = result.SystemConfig.Maintenance.IsActive
-	m.cache.whitelist = result.SystemConfig.Maintenance.Whitelist
-	m.cache.expiry = time.Now().Add(m.cacheDuration)
-
-	if m.debug {
-		fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Successfully updated maintenance status: active=%v, whitelist count=%d\n",
-			m.cache.isActive, len(m.cache.whitelist))
-	}
-
-	return m.cache.isActive, m.cache.whitelist
+	return result.SystemConfig.Maintenance.IsActive, result.SystemConfig.Maintenance.Whitelist, nil
 }
 
 func getClientIP(req *http.Request, debug bool) string {
@@ -403,4 +330,56 @@ func (m *MaintenanceCheck) isPrefixSkipped(path string) bool {
 	}
 
 	return false
+}
+
+func (m *MaintenanceCheck) startBackgroundRefresher() {
+	ticker := time.NewTicker(m.cacheDuration)
+	defer ticker.Stop()
+
+	if m.debug {
+		fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Started background refresher with interval of %v\n", m.cacheDuration)
+	}
+
+	for {
+		select {
+		case <-ticker.C:
+			m.refreshMaintenanceStatus()
+		case <-m.stopCh:
+			if m.debug {
+				fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Background refresher stopped\n")
+			}
+			return
+		}
+	}
+}
+
+func (m *MaintenanceCheck) refreshMaintenanceStatus() {
+	isActive, whitelist, err := m.fetchMaintenanceStatus()
+	if err != nil {
+		if m.debug {
+			fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Failed to refresh maintenance status: %v, using existing values\n", err)
+		}
+		m.cache.mutex.Lock()
+		m.cache.expiry = time.Now().Add(m.cacheDuration / 2)
+		m.cache.mutex.Unlock()
+		return
+	}
+
+	m.cache.mutex.Lock()
+	m.cache.isActive = isActive
+	m.cache.whitelist = whitelist
+	m.cache.expiry = time.Now().Add(m.cacheDuration)
+	m.cache.mutex.Unlock()
+
+	if m.debug {
+		fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Successfully updated maintenance status: active=%v, whitelist count=%d\n",
+			isActive, len(whitelist))
+	}
+}
+
+func (m *MaintenanceCheck) Close() {
+	if m.debug {
+		fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Closing and cleaning up resources\n")
+	}
+	close(m.stopCh)
 }

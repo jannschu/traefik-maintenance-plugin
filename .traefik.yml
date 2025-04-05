@@ -14,5 +14,10 @@ testData:
   skipPrefixes:
     - "/admin"
     - "/pgadmin"
+  skipHosts:
+    - pgadmin.citronus.pro
+    - grafana.citronus.pro
+    - rabbitmq.citronus.pro
+    - traefik.citronus.pro
 
 id: maintenanceCheck

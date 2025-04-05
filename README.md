@@ -5,14 +5,16 @@ A robust middleware plugin for Traefik that checks for maintenance status from a
 ## Features
 
 - Checks maintenance status from a configurable API endpoint
-- Caches the maintenance status for a configurable duration
+- Automatically refreshes maintenance status in the background at configurable intervals
 - Allows specific IP addresses to bypass maintenance mode
 - Supports a wildcard (`*`) for allowing all traffic during maintenance
 - Allows specific URL prefixes to bypass maintenance checks
+- Allows specific hosts to bypass maintenance checks (including wildcard domains)
 - Configurable request timeout for maintenance status API 
-- Thread-safe implementation to handle concurrent requests
+- Thread-safe implementation with zero impact on request performance
 - Customizable maintenance status code
-- Automatic cache warmup
+- Graceful startup and shutdown handling
+- High performance design with no bottlenecks under load
 
 ## Usage
 
@@ -95,6 +97,10 @@ http:
           skipPrefixes:
             - "/admin"
             - "/pgadmin"
+          skipHosts:
+            - "pgadmin.example.com"
+            - "grafana.example.com"
+            - "*.internal.example.com"
           maintenanceStatusCode: 512
           debug: false
 ```
@@ -131,7 +137,7 @@ The plugin extracts client IPs by checking headers in the following order:
 ## Parameters
 
 - `endpoint` (required): URL to check maintenance status
-- `cacheDurationInSeconds` (optional): How long to cache maintenance status, specified in seconds. Default is 10.
+- `cacheDurationInSeconds` (optional): How often the background process refreshes maintenance status, specified in seconds. Default is 10.
 - `requestTimeoutInSeconds` (optional): Timeout for API requests in seconds. Default is 5.
 - `skipPrefixes` (optional): List of URL path prefixes that should bypass maintenance checks, useful for admin interfaces. Default is empty list.
 - `maintenanceStatusCode` (optional): HTTP status code to return when in maintenance mode. Default is 512 (Service Unavailable).
@@ -140,14 +146,14 @@ The plugin extracts client IPs by checking headers in the following order:
 
 ## Production Readiness Features
 
-- **Concurrency handling**: The plugin correctly handles simultaneous requests using atomic operations and locks to prevent thundering herd problems
+- **Background refreshing**: Maintenance status is checked in a background process at regular intervals, completely separate from the request path
+- **Zero request overhead**: User requests never trigger maintenance API calls, resulting in consistent performance under any load level
 - **Error resilience**: If the maintenance API is unavailable or returns errors, the plugin gracefully falls back to cached values
-- **Timeout handling**: Configurable timeout for maintenance API requests prevents service degradation due to slow APIs
-- **Cache invalidation**: Maintenance status is automatically refreshed after the configured duration has elapsed
-- **Performance optimization**: The plugin uses read locks when possible to maximize throughput
-- **Cache warmup**: Makes an initial request at startup to populate the cache and avoid a request spike on first use
+- **Graceful shutdown**: Properly handles Traefik restart/reload without leaking resources
+- **Optimized concurrency**: Read-optimized locking strategy for maximum throughput
+- **Immediate startup**: Synchronous initial check ensures the plugin is ready to serve requests as soon as it starts
 - **HTTP transport tuning**: Optimized HTTP client with connection pooling and proper timeouts
-- **Standard HTTP status code**: Uses the proper 512 Service Unavailable status code by default (customizable)
+- **Clean failure modes**: Safe defaults in case of any failures
 
 ## Installation
 
