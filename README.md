@@ -15,6 +15,7 @@ A robust middleware plugin for Traefik that checks for maintenance status from a
 - Customizable maintenance status code
 - Graceful startup and shutdown handling
 - High performance design with no bottlenecks under load
+- Enhanced client IP detection for Kubernetes and proxy environments
 
 ## Usage
 
@@ -52,7 +53,11 @@ The maintenance API should return a JSON response in the following format:
   "system_config": {
     "maintenance": {
       "is_active": false,
-      "whitelist": ["192.168.1.1", "10.0.0.5"]
+      "whitelist": [
+        "192.168.1.1",
+        "10.0.0.5",
+        "172.16.0.0/16"
+      ]
     }
   }
 }
@@ -116,7 +121,8 @@ The plugin expects your maintenance status endpoint to return a JSON response in
       "is_active": false,
       "whitelist": [
         "192.168.1.1",
-        "10.0.0.5"
+        "10.0.0.5",
+        "172.16.0.0/16"
       ]
     }
   }
@@ -127,12 +133,20 @@ When `maintenance.is_active` is `true`, the middleware will check the whitelist:
 
 1. If the whitelist contains `"*"`, all users will be allowed to access the service.
 2. If the client's IP address matches any entry in the whitelist, they will be allowed through.
-3. Otherwise, the configured maintenance status code (default: 512) with the message "Service is in maintenance mode" will be returned.
+3. CIDR notation (like `192.168.0.0/24`) is supported for allowing entire IP ranges.
+4. Otherwise, the configured maintenance status code (default: 512) with the message "Service is in maintenance mode" will be returned.
 
 The plugin extracts client IPs by checking headers in the following order:
-1. X-Forwarded-For (first IP if multiple are present)
-2. X-Real-IP
-3. Request's RemoteAddr
+1. Cf-Connecting-Ip (CloudFlare)
+2. True-Client-Ip (Akamai/Cloudflare)
+3. X-Forwarded-For (standard proxy header, first IP if multiple are present)
+4. X-Real-Ip (Nginx)
+5. X-Client-Ip (Common)
+6. Forwarded (RFC 7239 standard)
+7. X-Original-Forwarded-For (Traefik specific)
+8. Request's RemoteAddr (as last resort)
+
+This extensive header checking ensures the plugin works correctly in complex proxy environments like Kubernetes.
 
 ## Parameters
 

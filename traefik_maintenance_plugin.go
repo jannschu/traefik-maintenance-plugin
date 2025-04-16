@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -597,6 +598,16 @@ func (m *MaintenanceCheck) ServeHTTP(rw http.ResponseWriter, req *http.Request) 
 		return
 	}
 
+	// Log all headers in debug mode to help with IP detection troubleshooting
+	if m.debug {
+		fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Request headers for diagnostics:\n")
+		for name, values := range req.Header {
+			fmt.Fprintf(os.Stdout, "[MaintenanceCheck]   %s: %s\n", name, strings.Join(values, ", "))
+		}
+
+		fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Using header priority order: Cf-Connecting-Ip > True-Client-Ip > X-Forwarded-For > X-Real-Ip > X-Client-Ip > Forwarded > X-Original-Forwarded-For > RemoteAddr\n")
+	}
+
 	// Normalize host by removing port if present (e.g., "example.com:8080" -> "example.com")
 	originalHost := req.Host
 	host := originalHost
@@ -662,26 +673,88 @@ func getClientIP(req *http.Request, debug bool) string {
 		return ""
 	}
 
-	for _, h := range []string{"X-Forwarded-For", "X-Real-Ip"} {
-		addresses := req.Header.Get(h)
-		if addresses != "" {
-			parts := strings.Split(addresses, ",")
-			if len(parts) > 0 {
-				ip := strings.TrimSpace(parts[0])
-				if debug {
-					fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Extracted IP from %s header: %s\n", h, ip)
-				}
-				return ip
+	// Ordered list of headers to check, with Traefik-specific headers first
+	// Traefik sets Cf-Connecting-Ip, True-Client-Ip, and X-Real-Ip headers
+	headers := []string{
+		"Cf-Connecting-Ip",         // CloudFlare
+		"True-Client-Ip",           // Akamai/Cloudflare
+		"X-Forwarded-For",          // Standard
+		"X-Real-Ip",                // Nginx
+		"X-Client-Ip",              // Common
+		"Forwarded",                // RFC 7239
+		"X-Original-Forwarded-For", // Traefik specific
+	}
+
+	if debug {
+		fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Attempting to extract client IP from request headers\n")
+		fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Header priority order: %v\n", headers)
+
+		// Log all available header values for IP detection troubleshooting
+		for _, h := range headers {
+			val := req.Header.Get(h)
+			if val != "" {
+				fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Found header %s = %s\n", h, val)
 			}
 		}
 	}
 
+	// First try all headers that might have the real client IP
+	for _, h := range headers {
+		addresses := req.Header.Get(h)
+		if addresses != "" {
+			if debug {
+				fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Processing header %s with value: %s\n", h, addresses)
+			}
+
+			// Special handling for Forwarded header (RFC 7239)
+			if h == "Forwarded" {
+				// Forwarded: for=192.0.2.60;proto=http;by=203.0.113.43
+				parts := strings.Split(addresses, ";")
+				for _, part := range parts {
+					if strings.HasPrefix(part, "for=") {
+						ip := strings.TrimPrefix(part, "for=")
+						// Remove possible port and IPv6
+						ip = strings.TrimSuffix(strings.TrimPrefix(ip, "["), "]")
+						if idx := strings.LastIndex(ip, ":"); idx != -1 {
+							ip = ip[:idx]
+						}
+						if debug {
+							fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Extracted IP from Forwarded header: %s\n", ip)
+						}
+						return strings.TrimSpace(ip)
+					}
+				}
+				if debug {
+					fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Could not extract IP from Forwarded header, no 'for=' parameter found\n")
+				}
+			} else {
+				// Normal comma-separated header value, take the leftmost (client) IP
+				parts := strings.Split(addresses, ",")
+				if len(parts) > 0 {
+					ip := strings.TrimSpace(parts[0])
+					// Check for IPv6 bracket notation [IPv6]:port
+					ip = strings.TrimSuffix(strings.TrimPrefix(ip, "["), "]")
+					if debug {
+						if len(parts) > 1 {
+							fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Multiple IPs found in %s, using leftmost: %s (full chain: %s)\n",
+								h, ip, addresses)
+						} else {
+							fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Extracted IP from %s header: %s\n", h, ip)
+						}
+					}
+					return ip
+				}
+			}
+		}
+	}
+
+	// Fallback to RemoteAddr if no headers found
 	ip := req.RemoteAddr
 	if idx := strings.LastIndex(ip, ":"); idx != -1 {
 		ip = ip[:idx]
 	}
 	if debug {
-		fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Using RemoteAddr IP: %s\n", ip)
+		fmt.Fprintf(os.Stdout, "[MaintenanceCheck] No proxy headers found, using RemoteAddr IP: %s\n", ip)
 	}
 	return ip
 }
@@ -697,6 +770,14 @@ func (m *MaintenanceCheck) isClientAllowed(req *http.Request, whitelist []string
 			fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Whitelist is empty, blocking request\n")
 		}
 		return false
+	}
+
+	// Extended debug info for whitelist
+	if m.debug {
+		fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Maintenance whitelist entries: %d items\n", len(whitelist))
+		for i, entry := range whitelist {
+			fmt.Fprintf(os.Stdout, "[MaintenanceCheck]   Whitelist[%d]: %s\n", i, entry)
+		}
 	}
 
 	for _, entry := range whitelist {
@@ -718,12 +799,38 @@ func (m *MaintenanceCheck) isClientAllowed(req *http.Request, whitelist []string
 		return false
 	}
 
+	if m.debug {
+		fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Client IP for whitelist check: %s\n", clientIP)
+		fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Beginning whitelist evaluation for IP %s\n", clientIP)
+	}
+
 	for _, ip := range whitelist {
 		if ip == clientIP {
 			if m.debug {
-				fmt.Fprintf(os.Stdout, "[MaintenanceCheck] IP '%s' in whitelist, allowing request\n", clientIP)
+				fmt.Fprintf(os.Stdout, "[MaintenanceCheck] IP '%s' matches whitelist entry '%s', allowing request\n", clientIP, ip)
 			}
 			return true
+		}
+
+		// Add support for CIDR notation if the whitelist entry contains a slash
+		if strings.Contains(ip, "/") {
+			if m.debug {
+				fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Checking if IP '%s' is in CIDR range '%s'\n", clientIP, ip)
+			}
+
+			match, err := isCIDRMatch(clientIP, ip)
+			if err != nil {
+				if m.debug {
+					fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Error checking CIDR match: %v\n", err)
+				}
+			} else if match {
+				if m.debug {
+					fmt.Fprintf(os.Stdout, "[MaintenanceCheck] IP '%s' is in CIDR range '%s', allowing request\n", clientIP, ip)
+				}
+				return true
+			} else if m.debug {
+				fmt.Fprintf(os.Stdout, "[MaintenanceCheck] IP '%s' is NOT in CIDR range '%s'\n", clientIP, ip)
+			}
 		}
 	}
 
@@ -821,4 +928,39 @@ func CloseSharedCache() {
 			}
 		}
 	})
+}
+
+// isCIDRMatch checks if an IP is contained within a CIDR range
+func isCIDRMatch(ip, cidr string) (bool, error) {
+	// Parse the CIDR notation
+	_, ipNet, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return false, fmt.Errorf("invalid CIDR notation %s: %v", cidr, err)
+	}
+
+	// Parse the IP
+	parsedIP := net.ParseIP(ip)
+	if parsedIP == nil {
+		return false, fmt.Errorf("invalid IP address %s (cannot be parsed as IPv4 or IPv6)", ip)
+	}
+
+	// Check if the IP is the correct version (IPv4/IPv6) for the CIDR
+	if (ipNet.IP.To4() == nil) != (parsedIP.To4() == nil) {
+		return false, fmt.Errorf("IP version mismatch: CIDR %s is %s but IP %s is %s",
+			cidr,
+			ipVersionName(ipNet.IP),
+			ip,
+			ipVersionName(parsedIP))
+	}
+
+	// Check if the IP is contained in the CIDR range
+	return ipNet.Contains(parsedIP), nil
+}
+
+// ipVersionName returns a string indicating whether an IP is IPv4 or IPv6
+func ipVersionName(ip net.IP) string {
+	if ip.To4() != nil {
+		return "IPv4"
+	}
+	return "IPv6"
 }
