@@ -19,5 +19,8 @@ testData:
     - grafana.citronus.pro
     - rabbitmq.citronus.pro
     - traefik.citronus.pro
+    - "*.citronus.world"
+  secretHeader: "X-Plugin-Secret"
+  secretHeaderValue: "maintenance-plugin-secret-token"
 
 id: maintenanceCheck

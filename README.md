@@ -42,6 +42,8 @@ spec:
         - *.internal.example.com
       maintenanceStatusCode: 512  # HTTP status code when in maintenance
       debug: false       # set to true to enable detailed logging
+      secretHeader: "X-Plugin-Secret"      # optional header name for plugin identification
+      secretHeaderValue: "your-secret-key" # optional header value for plugin identification
 ```
 
 ### API Format
@@ -64,6 +66,51 @@ The maintenance API should return a JSON response in the following format:
 ```
 
 When `is_active` is `true`, only IPs in the whitelist will be allowed to access the service. If the whitelist contains `"*"`, all IPs will be allowed.
+
+## Plugin vs Frontend Access Control
+
+If your maintenance API endpoint is also used by frontend applications to check maintenance status, you may want the plugin to receive full information (including IP whitelist) while the frontend receives only basic status information without sensitive data.
+
+To achieve this, configure the `secretHeader` and `secretHeaderValue` parameters:
+
+```yaml
+secretHeader: "X-Plugin-Secret"
+secretHeaderValue: "your-secret-token-here"
+```
+
+When configured, the plugin will send this header with all requests to your maintenance API. Your server can then:
+
+1. **For requests WITH the secret header**: Return full response including IP whitelist for the plugin
+2. **For requests WITHOUT the secret header**: Return only basic maintenance status for frontend
+
+Example server logic:
+```python
+def get_maintenance_status(request):
+    is_plugin_request = request.headers.get('X-Plugin-Secret') == 'your-secret-token-here'
+    
+    if is_plugin_request:
+        # Return full info for plugin
+        return {
+            "system_config": {
+                "maintenance": {
+                    "is_active": True,
+                    "whitelist": ["192.168.1.1", "10.0.0.0/8"]  # Include IPs
+                }
+            }
+        }
+    else:
+        # Return basic info for frontend
+        return {
+            "system_config": {
+                "maintenance": {
+                    "is_active": True
+                    # No whitelist for frontend
+                }
+            }
+        }
+```
+
+**Security Note**: Keep the secret token secure and use HTTPS for your maintenance API endpoint to prevent token interception.
 
 ## Local Testing
 
@@ -108,6 +155,8 @@ http:
             - "*.internal.example.com"
           maintenanceStatusCode: 512
           debug: false
+          secretHeader: "X-Plugin-Secret"
+          secretHeaderValue: "your-secret-key"
 ```
 
 ## Endpoint Format
@@ -157,6 +206,8 @@ This extensive header checking ensures the plugin works correctly in complex pro
 - `maintenanceStatusCode` (optional): HTTP status code to return when in maintenance mode. Default is 512 (Service Unavailable).
 - `skipHosts` (optional): List of hostnames that should bypass maintenance checks, useful for admin interfaces, monitoring tools, etc. Supports wildcard patterns like "*.example.com". Default is empty list.
 - `debug` (optional): Enable debug logging for troubleshooting. Default is false. When enabled, detailed information about decision making will be logged to stdout.
+- `secretHeader` (optional): Name of the HTTP header that will be sent with requests to identify the plugin. This allows the server to return different responses for plugin vs frontend requests. Default is empty (no header sent).
+- `secretHeaderValue` (optional): Value of the secret header. This should be a secret known only to the server and plugin configuration. Default is empty (no header sent).
 
 ## Production Readiness Features
 

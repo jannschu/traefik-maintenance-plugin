@@ -29,6 +29,8 @@ type Config struct {
 	RequestTimeoutInSeconds int      `json:"requestTimeoutInSeconds,omitempty"`
 	MaintenanceStatusCode   int      `json:"maintenanceStatusCode,omitempty"`
 	Debug                   bool     `json:"debug,omitempty"`
+	SecretHeader            string   `json:"secretHeader,omitempty"`
+	SecretHeaderValue       string   `json:"secretHeaderValue,omitempty"`
 }
 
 func CreateConfig() *Config {
@@ -70,6 +72,8 @@ var (
 		userAgent           string
 		failedAttempts      int       // Track failed attempts for exponential backoff
 		lastSuccessfulFetch time.Time // Track when we last had a successful fetch
+		secretHeader        string    // Secret header name for plugin identification
+		secretHeaderValue   string    // Secret header value for plugin identification
 	}
 	initLock     sync.Mutex
 	refreshLock  sync.Mutex
@@ -84,7 +88,7 @@ type MaintenanceCheck struct {
 	debug                 bool
 }
 
-func ensureSharedCacheInitialized(endpoint string, cacheDuration, requestTimeout time.Duration, debug bool, userAgent string) {
+func ensureSharedCacheInitialized(endpoint string, cacheDuration, requestTimeout time.Duration, debug bool, userAgent string, secretHeader, secretHeaderValue string) {
 	// Fast check without taking the lock
 	if sharedCache.initialized && sharedCache.endpoint == endpoint {
 		return
@@ -187,6 +191,8 @@ func ensureSharedCacheInitialized(endpoint string, cacheDuration, requestTimeout
 	sharedCache.failedAttempts = 0
 	sharedCache.expiry = time.Now().Add(-1 * time.Minute)
 	sharedCache.lastSuccessfulFetch = time.Time{} // Zero time
+	sharedCache.secretHeader = secretHeader
+	sharedCache.secretHeaderValue = secretHeaderValue
 	sharedCache.Unlock()
 
 	// Perform initial fetch exactly once
@@ -365,6 +371,19 @@ func refreshMaintenanceStatus() bool {
 	}
 
 	req.Header.Set("User-Agent", userAgent)
+
+	// Add secret header if configured
+	sharedCache.RLock()
+	secretHeader := sharedCache.secretHeader
+	secretHeaderValue := sharedCache.secretHeaderValue
+	sharedCache.RUnlock()
+
+	if secretHeader != "" && secretHeaderValue != "" {
+		req.Header.Set(secretHeader, secretHeaderValue)
+		if debug {
+			fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Added secret header '%s' for plugin identification\n", secretHeader)
+		}
+	}
 
 	var resp *http.Response
 	resp, err = client.Do(req)
@@ -563,7 +582,7 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 	}
 
 	// Initialize the shared cache if needed
-	ensureSharedCacheInitialized(config.Endpoint, cacheDuration, requestTimeout, config.Debug, userAgent)
+	ensureSharedCacheInitialized(config.Endpoint, cacheDuration, requestTimeout, config.Debug, userAgent, config.SecretHeader, config.SecretHeaderValue)
 
 	// Make deep copies of slices to prevent modifications
 	skipPrefixesCopy := make([]string, len(config.SkipPrefixes))
