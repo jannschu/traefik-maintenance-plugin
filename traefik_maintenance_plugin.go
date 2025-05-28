@@ -611,39 +611,26 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 }
 
 func (m *MaintenanceCheck) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
-	// Guard against nil request to prevent panic
 	if req == nil {
 		http.Error(rw, "Bad Request: nil request received", http.StatusBadRequest)
 		return
 	}
 
-	// Log all headers in debug mode to help with IP detection troubleshooting
-	if m.debug {
-		fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Request headers for diagnostics:\n")
-		for name, values := range req.Header {
-			fmt.Fprintf(os.Stdout, "[MaintenanceCheck]   %s: %s\n", name, strings.Join(values, ", "))
-		}
-
-		fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Using header priority order: Cf-Connecting-Ip > True-Client-Ip > X-Forwarded-For > X-Real-Ip > X-Client-Ip > Forwarded > X-Original-Forwarded-For > RemoteAddr\n")
+	if m.handleCORSPreflightRequest(rw, req) {
+		return
 	}
 
-	// Normalize host by removing port if present (e.g., "example.com:8080" -> "example.com")
-	originalHost := req.Host
-	host := originalHost
-	if colonIndex := strings.IndexByte(host, ':'); colonIndex > 0 {
-		host = host[:colonIndex]
-		if m.debug {
-			fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Normalized host from '%s' to '%s'\n", originalHost, host)
-		}
-	}
+	m.logRequestHeadersForDebugging(req)
+
+	normalizedHost := m.extractHostWithoutPort(req.Host)
 
 	if m.debug {
-		fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Evaluating request: host=%s, path=%s\n", host, req.URL.Path)
+		fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Evaluating request: host=%s, path=%s\n", normalizedHost, req.URL.Path)
 	}
 
-	if m.isHostSkipped(host) {
+	if m.isHostSkipped(normalizedHost) {
 		if m.debug {
-			fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Host '%s' is in skip list, bypassing maintenance check\n", host)
+			fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Host '%s' is in skip list, bypassing maintenance check\n", normalizedHost)
 		}
 		m.next.ServeHTTP(rw, req)
 		return
@@ -668,15 +655,7 @@ func (m *MaintenanceCheck) ServeHTTP(rw http.ResponseWriter, req *http.Request) 
 			return
 		}
 
-		if m.debug {
-			fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Access denied, returning status code %d\n",
-				m.maintenanceStatusCode)
-		}
-
-		// Set content type for better client compatibility
-		rw.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		rw.WriteHeader(m.maintenanceStatusCode)
-		_, _ = rw.Write([]byte("Service is in maintenance mode"))
+		m.sendMaintenanceResponseWithCORS(rw, req)
 		return
 	}
 
@@ -684,6 +663,110 @@ func (m *MaintenanceCheck) ServeHTTP(rw http.ResponseWriter, req *http.Request) 
 		fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Maintenance mode is inactive, allowing request\n")
 	}
 	m.next.ServeHTTP(rw, req)
+}
+
+func (m *MaintenanceCheck) handleCORSPreflightRequest(rw http.ResponseWriter, req *http.Request) bool {
+	if req.Method != http.MethodOptions {
+		return false
+	}
+
+	clientOrigin := req.Header.Get("Origin")
+	m.setCORSPreflightHeaders(rw, clientOrigin)
+
+	if m.isMaintenanceActiveForClient(req) {
+		m.sendBlockedPreflightResponse(rw)
+		return true
+	}
+
+	m.sendSuccessfulPreflightResponse(rw)
+	return true
+}
+
+func (m *MaintenanceCheck) setCORSPreflightHeaders(rw http.ResponseWriter, origin string) {
+	if origin == "" {
+		return
+	}
+
+	corsHeaders := map[string]string{
+		"Access-Control-Allow-Origin":      origin,
+		"Access-Control-Allow-Methods":     "GET, POST, PUT, DELETE, OPTIONS",
+		"Access-Control-Allow-Headers":     "Accept, Authorization, Content-Type, X-CSRF-Token",
+		"Access-Control-Allow-Credentials": "true",
+		"Access-Control-Max-Age":           "86400",
+	}
+
+	for headerName, headerValue := range corsHeaders {
+		rw.Header().Set(headerName, headerValue)
+	}
+
+	if m.debug {
+		fmt.Fprintf(os.Stdout, "[MaintenanceCheck] CORS preflight handled for origin: %s\n", origin)
+	}
+}
+
+func (m *MaintenanceCheck) isMaintenanceActiveForClient(req *http.Request) bool {
+	isActive, whitelist := getMaintenanceStatus()
+	return isActive && !m.isClientAllowed(req, whitelist)
+}
+
+func (m *MaintenanceCheck) sendBlockedPreflightResponse(rw http.ResponseWriter) {
+	if m.debug {
+		fmt.Fprintf(os.Stdout, "[MaintenanceCheck] CORS preflight blocked due to maintenance mode\n")
+	}
+
+	rw.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	rw.WriteHeader(m.maintenanceStatusCode)
+	_, _ = rw.Write([]byte("Service is in maintenance mode"))
+}
+
+func (m *MaintenanceCheck) sendSuccessfulPreflightResponse(rw http.ResponseWriter) {
+	rw.WriteHeader(http.StatusNoContent)
+}
+
+func (m *MaintenanceCheck) logRequestHeadersForDebugging(req *http.Request) {
+	if !m.debug {
+		return
+	}
+
+	fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Request headers for diagnostics:\n")
+	for headerName, headerValues := range req.Header {
+		fmt.Fprintf(os.Stdout, "[MaintenanceCheck]   %s: %s\n", headerName, strings.Join(headerValues, ", "))
+	}
+
+	fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Using header priority order: Cf-Connecting-Ip > True-Client-Ip > X-Forwarded-For > X-Real-Ip > X-Client-Ip > Forwarded > X-Original-Forwarded-For > RemoteAddr\n")
+}
+
+func (m *MaintenanceCheck) extractHostWithoutPort(originalHost string) string {
+	host := originalHost
+	if colonIndex := strings.IndexByte(host, ':'); colonIndex > 0 {
+		host = host[:colonIndex]
+		if m.debug {
+			fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Normalized host from '%s' to '%s'\n", originalHost, host)
+		}
+	}
+	return host
+}
+
+func (m *MaintenanceCheck) sendMaintenanceResponseWithCORS(rw http.ResponseWriter, req *http.Request) {
+	if m.debug {
+		fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Access denied, returning status code %d\n", m.maintenanceStatusCode)
+	}
+
+	m.addCORSHeadersToMaintenanceResponse(rw, req)
+
+	rw.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	rw.WriteHeader(m.maintenanceStatusCode)
+	_, _ = rw.Write([]byte("Service is in maintenance mode"))
+}
+
+func (m *MaintenanceCheck) addCORSHeadersToMaintenanceResponse(rw http.ResponseWriter, req *http.Request) {
+	clientOrigin := req.Header.Get("Origin")
+	if clientOrigin == "" {
+		return
+	}
+
+	rw.Header().Set("Access-Control-Allow-Origin", clientOrigin)
+	rw.Header().Set("Access-Control-Allow-Credentials", "true")
 }
 
 func getClientIP(req *http.Request, debug bool) string {

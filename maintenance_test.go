@@ -1371,3 +1371,215 @@ func TestSecretHeaderFunctionality(t *testing.T) {
 		t.Errorf("Expected status code 503 for non-whitelisted IP, got %d", response2.StatusCode)
 	}
 }
+
+func TestCORSFunctionalityDuringMaintenance(t *testing.T) {
+	// Reset shared state between tests
+	plugin.CloseSharedCache()
+	time.Sleep(100 * time.Millisecond)
+
+	// Set up test server with active maintenance mode
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		response := maintenanceResponse{}
+
+		switch r.URL.Path {
+		case "/maintenance-active-no-whitelist":
+			response.SystemConfig.Maintenance.IsActive = true
+			response.SystemConfig.Maintenance.Whitelist = []string{} // No one allowed
+		case "/maintenance-active-with-whitelist":
+			response.SystemConfig.Maintenance.IsActive = true
+			response.SystemConfig.Maintenance.Whitelist = []string{"192.168.1.1"} // Specific IP allowed
+		default:
+			response.SystemConfig.Maintenance.IsActive = false
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
+	}))
+	defer ts.Close()
+
+	tests := []struct {
+		name                string
+		endpoint            string
+		method              string
+		origin              string
+		clientIP            string
+		expectedStatusCode  int
+		expectedCORSOrigin  string
+		expectedCORSMethods string
+		expectedCORSHeaders string
+		expectedCORSMaxAge  string
+		description         string
+	}{
+		{
+			name:                "CORS preflight - maintenance active, blocked IP",
+			endpoint:            ts.URL + "/maintenance-active-no-whitelist",
+			method:              http.MethodOptions,
+			origin:              "https://citronus.pro",
+			clientIP:            "10.0.0.1",
+			expectedStatusCode:  512,
+			expectedCORSOrigin:  "https://citronus.pro",
+			expectedCORSMethods: "GET, POST, PUT, DELETE, OPTIONS",
+			expectedCORSHeaders: "Accept, Authorization, Content-Type, X-CSRF-Token",
+			expectedCORSMaxAge:  "86400",
+			description:         "Should handle CORS preflight but block due to maintenance and no whitelist",
+		},
+		{
+			name:                "CORS preflight - maintenance active, allowed IP",
+			endpoint:            ts.URL + "/maintenance-active-with-whitelist",
+			method:              http.MethodOptions,
+			origin:              "https://citronus.pro",
+			clientIP:            "192.168.1.1",
+			expectedStatusCode:  http.StatusNoContent, // Successful preflight
+			expectedCORSOrigin:  "https://citronus.pro",
+			expectedCORSMethods: "GET, POST, PUT, DELETE, OPTIONS",
+			expectedCORSHeaders: "Accept, Authorization, Content-Type, X-CSRF-Token",
+			expectedCORSMaxAge:  "86400",
+			description:         "Should handle CORS preflight and allow due to IP whitelist",
+		},
+		{
+			name:                "CORS preflight - maintenance inactive",
+			endpoint:            ts.URL, // Default inactive maintenance
+			method:              http.MethodOptions,
+			origin:              "https://citronus.pro",
+			clientIP:            "10.0.0.1",
+			expectedStatusCode:  http.StatusNoContent, // Successful preflight
+			expectedCORSOrigin:  "https://citronus.pro",
+			expectedCORSMethods: "GET, POST, PUT, DELETE, OPTIONS",
+			expectedCORSHeaders: "Accept, Authorization, Content-Type, X-CSRF-Token",
+			expectedCORSMaxAge:  "86400",
+			description:         "Should handle CORS preflight normally when maintenance is inactive",
+		},
+		{
+			name:               "Regular request - maintenance active, blocked IP with CORS",
+			endpoint:           ts.URL + "/maintenance-active-no-whitelist",
+			method:             http.MethodGet,
+			origin:             "https://citronus.pro",
+			clientIP:           "10.0.0.1",
+			expectedStatusCode: 512, // Maintenance status code
+			expectedCORSOrigin: "https://citronus.pro",
+			description:        "Should return maintenance status with CORS headers for blocked requests",
+		},
+		{
+			name:               "Regular request - maintenance active, allowed IP",
+			endpoint:           ts.URL + "/maintenance-active-with-whitelist",
+			method:             http.MethodGet,
+			origin:             "https://citronus.pro",
+			clientIP:           "192.168.1.1",
+			expectedStatusCode: http.StatusOK, // Pass through to backend
+			description:        "Should pass through to backend for whitelisted IP",
+		},
+		{
+			name:               "CORS preflight - no origin header",
+			endpoint:           ts.URL + "/maintenance-active-no-whitelist",
+			method:             http.MethodOptions,
+			origin:             "", // No origin
+			clientIP:           "10.0.0.1",
+			expectedStatusCode: 512, // Still blocked due to maintenance
+			description:        "Should handle preflight without origin but still apply maintenance rules",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Reset shared state for each test
+			plugin.CloseSharedCache()
+			time.Sleep(100 * time.Millisecond)
+
+			cfg := plugin.CreateConfig()
+			cfg.Endpoint = tt.endpoint
+			cfg.CacheDurationInSeconds = 10
+			cfg.RequestTimeoutInSeconds = 5
+			cfg.MaintenanceStatusCode = 512
+			cfg.Debug = true
+
+			next := http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+				rw.WriteHeader(http.StatusOK)
+			})
+
+			handler, err := plugin.New(context.Background(), next, cfg, "cors-test")
+			if err != nil {
+				t.Fatalf("Error creating plugin: %v", err)
+			}
+
+			// Allow time for initial fetch to complete
+			time.Sleep(100 * time.Millisecond)
+
+			// Create request
+			req := httptest.NewRequest(tt.method, "http://localhost/", nil)
+
+			if tt.origin != "" {
+				req.Header.Set("Origin", tt.origin)
+			}
+
+			if tt.clientIP != "" {
+				req.Header.Set("X-Forwarded-For", tt.clientIP)
+			}
+
+			// For preflight requests, add typical CORS headers
+			if tt.method == http.MethodOptions {
+				req.Header.Set("Access-Control-Request-Method", "GET")
+				req.Header.Set("Access-Control-Request-Headers", "Content-Type,Authorization")
+			}
+
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, req)
+
+			response := recorder.Result()
+			defer response.Body.Close()
+
+			// Check status code
+			if response.StatusCode != tt.expectedStatusCode {
+				t.Errorf("%s: Expected status code %d, got %d", tt.description, tt.expectedStatusCode, response.StatusCode)
+			}
+
+			// Check CORS headers if expected
+			if tt.expectedCORSOrigin != "" {
+				actualOrigin := response.Header.Get("Access-Control-Allow-Origin")
+				if actualOrigin != tt.expectedCORSOrigin {
+					t.Errorf("%s: Expected CORS origin '%s', got '%s'", tt.description, tt.expectedCORSOrigin, actualOrigin)
+				}
+			}
+
+			if tt.expectedCORSMethods != "" {
+				actualMethods := response.Header.Get("Access-Control-Allow-Methods")
+				if actualMethods != tt.expectedCORSMethods {
+					t.Errorf("%s: Expected CORS methods '%s', got '%s'", tt.description, tt.expectedCORSMethods, actualMethods)
+				}
+			}
+
+			if tt.expectedCORSHeaders != "" {
+				actualHeaders := response.Header.Get("Access-Control-Allow-Headers")
+				if actualHeaders != tt.expectedCORSHeaders {
+					t.Errorf("%s: Expected CORS headers '%s', got '%s'", tt.description, tt.expectedCORSHeaders, actualHeaders)
+				}
+			}
+
+			if tt.expectedCORSMaxAge != "" {
+				actualMaxAge := response.Header.Get("Access-Control-Max-Age")
+				if actualMaxAge != tt.expectedCORSMaxAge {
+					t.Errorf("%s: Expected CORS max-age '%s', got '%s'", tt.description, tt.expectedCORSMaxAge, actualMaxAge)
+				}
+			}
+
+			// For maintenance responses, check that credentials are allowed (only if origin was present)
+			if tt.expectedStatusCode == 512 && tt.expectedCORSOrigin != "" {
+				credentialsAllowed := response.Header.Get("Access-Control-Allow-Credentials")
+				if credentialsAllowed != "true" {
+					t.Errorf("%s: Expected Access-Control-Allow-Credentials 'true', got '%s'", tt.description, credentialsAllowed)
+				}
+			}
+
+			// Verify content type for all maintenance responses (both with and without origin)
+			if tt.expectedStatusCode == 512 {
+				contentType := response.Header.Get("Content-Type")
+				if contentType != "text/plain; charset=utf-8" {
+					t.Errorf("%s: Expected content type 'text/plain; charset=utf-8', got '%s'", tt.description, contentType)
+				}
+			}
+
+			if t.Failed() {
+				t.Logf("Response headers: %+v", response.Header)
+			}
+		})
+	}
+}

@@ -10,12 +10,42 @@ A robust middleware plugin for Traefik that checks for maintenance status from a
 - Supports a wildcard (`*`) for allowing all traffic during maintenance
 - Allows specific URL prefixes to bypass maintenance checks
 - Allows specific hosts to bypass maintenance checks (including wildcard domains)
+- **Full CORS support for preflight and actual requests during maintenance**
 - Configurable request timeout for maintenance status API 
 - Thread-safe implementation with zero impact on request performance
 - Customizable maintenance status code
 - Graceful startup and shutdown handling
 - High performance design with no bottlenecks under load
 - Enhanced client IP detection for Kubernetes and proxy environments
+
+## CORS Support
+
+The plugin provides comprehensive CORS support to handle modern web applications:
+
+### CORS Features
+- **Preflight Request Handling**: Properly handles OPTIONS requests with appropriate CORS headers
+- **Origin Validation**: Reflects the requesting origin in `Access-Control-Allow-Origin` header
+- **Credentials Support**: Sets `Access-Control-Allow-Credentials: true` for authenticated requests
+- **Maintenance Mode Integration**: CORS headers are included even when returning maintenance responses
+- **Standard Headers**: Supports common headers like `Accept`, `Authorization`, `Content-Type`, `X-CSRF-Token`
+
+### CORS During Maintenance
+When maintenance mode is active:
+1. **Preflight requests (OPTIONS)** receive proper CORS headers and are blocked/allowed based on IP whitelist
+2. **Regular requests** that are blocked due to maintenance still receive CORS headers for proper client handling
+3. **Successful requests** (whitelisted IPs) pass through normally with backend CORS handling
+
+This ensures that frontend applications receive proper CORS responses even during maintenance, preventing browser console errors and enabling graceful degradation.
+
+## Production Ready
+
+This plugin has been thoroughly tested and is production-ready with:
+- ✅ Comprehensive test coverage including edge cases
+- ✅ CORS functionality fully tested
+- ✅ Error handling and graceful degradation
+- ✅ Performance optimization and zero request overhead
+- ✅ Memory safety and concurrent access protection
+- ✅ Kubernetes and proxy environment support
 
 ## Usage
 
