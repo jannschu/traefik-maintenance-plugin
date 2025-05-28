@@ -27,15 +27,21 @@ The plugin provides comprehensive CORS support to handle modern web applications
 - **Origin Validation**: Reflects the requesting origin in `Access-Control-Allow-Origin` header
 - **Credentials Support**: Sets `Access-Control-Allow-Credentials: true` for authenticated requests
 - **Maintenance Mode Integration**: CORS headers are included even when returning maintenance responses
+- **Complete Header Support**: Provides all necessary CORS headers including `Access-Control-Allow-Methods`, `Access-Control-Allow-Headers`, and `Access-Control-Max-Age`
 - **Standard Headers**: Supports common headers like `Accept`, `Authorization`, `Content-Type`, `X-CSRF-Token`
 
 ### CORS During Maintenance
 When maintenance mode is active:
 1. **Preflight requests (OPTIONS)** receive proper CORS headers and are blocked/allowed based on IP whitelist
-2. **Regular requests** that are blocked due to maintenance still receive CORS headers for proper client handling
+2. **Regular requests** that are blocked due to maintenance receive full CORS headers for proper client handling, including:
+   - `Access-Control-Allow-Origin` (reflects the requesting origin)
+   - `Access-Control-Allow-Methods` (GET, POST, PUT, DELETE, OPTIONS)
+   - `Access-Control-Allow-Headers` (Accept, Authorization, Content-Type, X-CSRF-Token)
+   - `Access-Control-Allow-Credentials` (true)
+   - `Access-Control-Max-Age` (86400)
 3. **Successful requests** (whitelisted IPs) pass through normally with backend CORS handling
 
-This ensures that frontend applications receive proper CORS responses even during maintenance, preventing browser console errors and enabling graceful degradation.
+This ensures that frontend applications receive proper CORS responses even during maintenance, preventing browser console errors and enabling graceful degradation of XHR/fetch requests.
 
 ## Production Ready
 
@@ -111,7 +117,7 @@ secretHeaderValue: "your-secret-token-here"
 When configured, the plugin will send this header with all requests to your maintenance API. Your server can then:
 
 1. **For requests WITH the secret header**: Return full response including IP whitelist for the plugin
-2. **For requests WITHOUT the secret header**: Return only basic maintenance status for frontend
+2. **For requests WITHOUT the secret header**: Return only basic info for frontend
 
 Example server logic:
 ```python

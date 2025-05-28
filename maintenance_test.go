@@ -1450,14 +1450,17 @@ func TestCORSFunctionalityDuringMaintenance(t *testing.T) {
 			description:         "Should pass OPTIONS to backend when maintenance is inactive",
 		},
 		{
-			name:               "Regular request - maintenance active, blocked IP with CORS",
-			endpoint:           ts.URL + "/maintenance-active-no-whitelist",
-			method:             http.MethodGet,
-			origin:             "https://citronus.pro",
-			clientIP:           "10.0.0.1",
-			expectedStatusCode: 512, // Maintenance status code
-			expectedCORSOrigin: "https://citronus.pro",
-			description:        "Should return maintenance status with CORS headers for blocked requests",
+			name:                "Regular request - maintenance active, blocked IP with CORS",
+			endpoint:            ts.URL + "/maintenance-active-no-whitelist",
+			method:              http.MethodGet,
+			origin:              "https://citronus.pro",
+			clientIP:            "10.0.0.1",
+			expectedStatusCode:  512, // Maintenance status code
+			expectedCORSOrigin:  "https://citronus.pro",
+			expectedCORSMethods: "GET, POST, PUT, DELETE, OPTIONS",
+			expectedCORSHeaders: "Accept, Authorization, Content-Type, X-CSRF-Token",
+			expectedCORSMaxAge:  "86400",
+			description:         "Should return maintenance status with full CORS headers for blocked requests",
 		},
 		{
 			name:               "Regular request - maintenance active, allowed IP",

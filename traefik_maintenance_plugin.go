@@ -771,7 +771,14 @@ func (m *MaintenanceCheck) addCORSHeadersToMaintenanceResponse(rw http.ResponseW
 	}
 
 	rw.Header().Set("Access-Control-Allow-Origin", clientOrigin)
+	rw.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+	rw.Header().Set("Access-Control-Allow-Headers", "Accept, Authorization, Content-Type, X-CSRF-Token")
 	rw.Header().Set("Access-Control-Allow-Credentials", "true")
+	rw.Header().Set("Access-Control-Max-Age", "86400")
+
+	if m.debug {
+		fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Added CORS headers to maintenance response for origin: %s\n", clientOrigin)
+	}
 }
 
 func getClientIP(req *http.Request, debug bool) string {
