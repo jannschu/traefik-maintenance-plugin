@@ -1442,12 +1442,12 @@ func TestCORSFunctionalityDuringMaintenance(t *testing.T) {
 			method:              http.MethodOptions,
 			origin:              "https://citronus.pro",
 			clientIP:            "10.0.0.1",
-			expectedStatusCode:  http.StatusNoContent, // Successful preflight
-			expectedCORSOrigin:  "https://citronus.pro",
-			expectedCORSMethods: "GET, POST, PUT, DELETE, OPTIONS",
-			expectedCORSHeaders: "Accept, Authorization, Content-Type, X-CSRF-Token",
-			expectedCORSMaxAge:  "86400",
-			description:         "Should handle CORS preflight normally when maintenance is inactive",
+			expectedStatusCode:  http.StatusOK, // Backend handles OPTIONS and returns 200 (from our test server)
+			expectedCORSOrigin:  "",            // No CORS headers from plugin when maintenance is off
+			expectedCORSMethods: "",
+			expectedCORSHeaders: "",
+			expectedCORSMaxAge:  "",
+			description:         "Should pass OPTIONS to backend when maintenance is inactive",
 		},
 		{
 			name:               "Regular request - maintenance active, blocked IP with CORS",

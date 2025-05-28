@@ -670,10 +670,15 @@ func (m *MaintenanceCheck) handleCORSPreflightRequest(rw http.ResponseWriter, re
 		return false
 	}
 
+	isActive, whitelist := getMaintenanceStatus()
+	if !isActive {
+		return false
+	}
+
 	clientOrigin := req.Header.Get("Origin")
 	m.setCORSPreflightHeaders(rw, clientOrigin)
 
-	if m.isMaintenanceActiveForClient(req) {
+	if !m.isClientAllowed(req, whitelist) {
 		m.sendBlockedPreflightResponse(rw)
 		return true
 	}
