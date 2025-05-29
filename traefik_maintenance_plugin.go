@@ -3,7 +3,6 @@ package traefik_maintenance_plugin
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"math/rand"
 	"net"
@@ -11,7 +10,6 @@ import (
 	"os"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -22,19 +20,37 @@ var (
 )
 
 type Config struct {
-	Endpoint                string   `json:"endpoint,omitempty"`
-	CacheDurationInSeconds  int      `json:"cacheDurationInSeconds,omitempty"`
-	SkipPrefixes            []string `json:"skipPrefixes,omitempty"`
-	SkipHosts               []string `json:"skipHosts,omitempty"`
-	RequestTimeoutInSeconds int      `json:"requestTimeoutInSeconds,omitempty"`
-	MaintenanceStatusCode   int      `json:"maintenanceStatusCode,omitempty"`
-	Debug                   bool     `json:"debug,omitempty"`
-	SecretHeader            string   `json:"secretHeader,omitempty"`
-	SecretHeaderValue       string   `json:"secretHeaderValue,omitempty"`
+	EnvironmentEndpoints    map[string]string            `json:"environmentEndpoints,omitempty"`
+	EnvironmentSecrets      map[string]EnvironmentSecret `json:"environmentSecrets,omitempty"`
+	CacheDurationInSeconds  int                          `json:"cacheDurationInSeconds,omitempty"`
+	SkipPrefixes            []string                     `json:"skipPrefixes,omitempty"`
+	SkipHosts               []string                     `json:"skipHosts,omitempty"`
+	RequestTimeoutInSeconds int                          `json:"requestTimeoutInSeconds,omitempty"`
+	MaintenanceStatusCode   int                          `json:"maintenanceStatusCode,omitempty"`
+	Debug                   bool                         `json:"debug,omitempty"`
+	SecretHeader            string                       `json:"secretHeader,omitempty"`
+	SecretHeaderValue       string                       `json:"secretHeaderValue,omitempty"`
+}
+
+type EnvironmentSecret struct {
+	Header string `json:"header"`
+	Value  string `json:"value"`
 }
 
 func CreateConfig() *Config {
 	return &Config{
+		EnvironmentEndpoints: map[string]string{
+			".com":   "http://admin-service.admin/admin/api/system-config/?format=json",
+			".world": "http://admin-service.stage-admin/admin/api/system-config/?format=json",
+			".pro":   "http://admin-service.develop-admin/admin/api/system-config/?format=json",
+			"":       "http://admin-service.admin/admin/api/system-config/?format=json",
+		},
+		EnvironmentSecrets: map[string]EnvironmentSecret{
+			".com":   {Header: "X-Plugin-Secret", Value: ""},
+			".world": {Header: "X-Plugin-Secret", Value: ""},
+			".pro":   {Header: "X-Plugin-Secret", Value: ""},
+			"":       {Header: "X-Plugin-Secret", Value: ""},
+		},
 		CacheDurationInSeconds:  10,
 		SkipPrefixes:            []string{},
 		SkipHosts:               []string{},
@@ -53,27 +69,31 @@ type MaintenanceResponse struct {
 	} `json:"system_config"`
 }
 
-// sharedCache holds the singleton cache instance for all middleware instances
+type EnvironmentCache struct {
+	isActive            bool
+	whitelist           []string
+	expiry              time.Time
+	failedAttempts      int
+	lastSuccessfulFetch time.Time
+}
+
+// sharedCache holds maintenance status for multiple environments
 var (
 	sharedCache struct {
 		sync.RWMutex
-		isActive            bool
-		whitelist           []string
-		expiry              time.Time
-		endpoint            string
-		cacheDuration       time.Duration
-		requestTimeout      time.Duration
-		client              *http.Client
-		debug               bool
-		initialized         bool
-		refresherRunning    bool
-		refreshInProgress   atomic.Bool // Use atomic for faster checks without locks
-		stopCh              chan struct{}
-		userAgent           string
-		failedAttempts      int       // Track failed attempts for exponential backoff
-		lastSuccessfulFetch time.Time // Track when we last had a successful fetch
-		secretHeader        string    // Secret header name for plugin identification
-		secretHeaderValue   string    // Secret header value for plugin identification
+		environments         map[string]*EnvironmentCache
+		environmentEndpoints map[string]string
+		environmentSecrets   map[string]EnvironmentSecret
+		cacheDuration        time.Duration
+		requestTimeout       time.Duration
+		client               *http.Client
+		debug                bool
+		initialized          bool
+		refresherRunning     bool
+		stopCh               chan struct{}
+		userAgent            string
+		secretHeader         string
+		secretHeaderValue    string
 	}
 	initLock     sync.Mutex
 	refreshLock  sync.Mutex
@@ -88,24 +108,15 @@ type MaintenanceCheck struct {
 	debug                 bool
 }
 
-func ensureSharedCacheInitialized(endpoint string, cacheDuration, requestTimeout time.Duration, debug bool, userAgent string, secretHeader, secretHeaderValue string) {
-	// Fast check without taking the lock
-	if sharedCache.initialized && sharedCache.endpoint == endpoint {
+func ensureSharedCacheInitialized(environmentEndpoints map[string]string, environmentSecrets map[string]EnvironmentSecret, cacheDuration, requestTimeout time.Duration, debug bool, userAgent string, secretHeader, secretHeaderValue string) {
+	if sharedCache.initialized {
 		return
 	}
 
 	initLock.Lock()
 	defer initLock.Unlock()
 
-	if sharedCache.initialized && sharedCache.endpoint == endpoint {
-		return
-	}
-
-	// Validate inputs before proceeding
-	if endpoint == "" {
-		if debug {
-			fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Error: empty endpoint provided\n")
-		}
+	if sharedCache.initialized {
 		return
 	}
 
@@ -123,32 +134,25 @@ func ensureSharedCacheInitialized(endpoint string, cacheDuration, requestTimeout
 		requestTimeout = 5 * time.Second
 	}
 
-	// Proper cleanup of previous refresher if configuration changes
 	var wg sync.WaitGroup
 	if sharedCache.initialized && sharedCache.refresherRunning && sharedCache.stopCh != nil {
 		wg.Add(1)
 		oldStopCh := sharedCache.stopCh
 
-		// Create a new stopCh before closing the old one
 		sharedCache.stopCh = make(chan struct{})
 
-		// Set a flag to track shutdown in progress
 		sharedCache.Lock()
 		shutdownInProgress := true
 		sharedCache.Unlock()
 
-		// Close the old channel to signal the refresher to stop
 		close(oldStopCh)
 
-		// Wait for the refresher to acknowledge shutdown with a timeout
 		go func() {
-			// Give the refresher time to shut down gracefully
 			shutdownTimer := time.NewTimer(500 * time.Millisecond)
 			defer shutdownTimer.Stop()
 
 			<-shutdownTimer.C
 
-			// Check if refresher is still running after timeout
 			sharedCache.Lock()
 			if shutdownInProgress && sharedCache.refresherRunning {
 				if debug {
@@ -177,58 +181,69 @@ func ensureSharedCacheInitialized(endpoint string, cacheDuration, requestTimeout
 		Transport: transport,
 	}
 
-	// Update configuration under lock
 	sharedCache.Lock()
 	sharedCache.client = client
-	sharedCache.endpoint = endpoint
+	sharedCache.environments = make(map[string]*EnvironmentCache)
+	sharedCache.environmentEndpoints = environmentEndpoints
+	sharedCache.environmentSecrets = environmentSecrets
 	sharedCache.cacheDuration = cacheDuration
 	sharedCache.requestTimeout = requestTimeout
 	sharedCache.debug = debug
 	sharedCache.userAgent = userAgent
 	sharedCache.initialized = true
 	sharedCache.refresherRunning = false
-	sharedCache.refreshInProgress.Store(false)
-	sharedCache.failedAttempts = 0
-	sharedCache.expiry = time.Now().Add(-1 * time.Minute)
-	sharedCache.lastSuccessfulFetch = time.Time{} // Zero time
 	sharedCache.secretHeader = secretHeader
 	sharedCache.secretHeaderValue = secretHeaderValue
 	sharedCache.Unlock()
 
-	// Perform initial fetch exactly once
-	go func() {
-		if debug {
-			fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Scheduling initial fetch for endpoint '%s'\n", endpoint)
+	// Perform initial fetch for all environments
+	if debug {
+		fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Performing initial fetch for all environments\n")
+	}
+
+	firstEnv := true
+	for envSuffix := range environmentEndpoints {
+		if firstEnv {
+			// Первую среду загружаем синхронно
+			var retryDelay time.Duration = 100 * time.Millisecond
+			for i := 0; i < 5; i++ {
+				if refreshMaintenanceStatusForEnvironment(envSuffix) {
+					break
+				}
+
+				if debug {
+					fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Initial fetch failed for environment '%s', retrying in %v\n", envSuffix, retryDelay)
+				}
+				time.Sleep(retryDelay)
+				retryDelay *= 2
+			}
+			firstEnv = false
+		} else {
+			go func(env string) {
+				var retryDelay time.Duration = 100 * time.Millisecond
+				for i := 0; i < 5; i++ {
+					if refreshMaintenanceStatusForEnvironment(env) {
+						break
+					}
+
+					if debug {
+						fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Initial fetch failed for environment '%s', retrying in %v\n", env, retryDelay)
+					}
+					select {
+					case <-sharedCache.stopCh:
+						return
+					case <-time.After(retryDelay):
+					}
+					retryDelay *= 2
+				}
+			}(envSuffix)
 		}
+	}
 
-		// Use exponential backoff for the first fetch
-		var retryDelay time.Duration = 100 * time.Millisecond
-		for i := 0; i < 5; i++ { // Try up to 5 times
-			if refreshMaintenanceStatus() {
-				break // Success, exit retry loop
-			}
-
-			// Failed, wait and retry
-			if debug {
-				fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Initial fetch failed, retrying in %v\n", retryDelay)
-			}
-			select {
-			case <-sharedCache.stopCh:
-				// Stop retrying if shutdown requested
-				return
-			case <-time.After(retryDelay):
-				// Continue with retry
-			}
-			retryDelay *= 2 // Exponential backoff
-		}
-	}()
-
-	// Start background refresher
 	startBackgroundRefresher()
 }
 
 func startBackgroundRefresher() {
-	// Fast check without lock first
 	if sharedCache.refresherRunning {
 		return
 	}
@@ -249,7 +264,6 @@ func startBackgroundRefresher() {
 		fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Started shared background refresher with interval of %v\n", cacheDuration)
 	}
 
-	// Start the refresher in a goroutine
 	go func() {
 		ticker := time.NewTicker(cacheDuration)
 		defer ticker.Stop()
@@ -257,16 +271,7 @@ func startBackgroundRefresher() {
 		for {
 			select {
 			case <-ticker.C:
-				sharedCache.RLock()
-				lastFetch := sharedCache.lastSuccessfulFetch
-				sharedCache.RUnlock()
-
-				if !lastFetch.IsZero() && time.Since(lastFetch) > cacheDuration*10 {
-					fmt.Fprintf(os.Stdout, "[MaintenanceCheck] WARNING: No successful fetch in %v, service may be unavailable\n",
-						time.Since(lastFetch))
-				}
-
-				refreshMaintenanceStatus()
+				refreshAllEnvironments()
 			case <-stopCh:
 				if debug {
 					fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Shared background refresher stopped\n")
@@ -281,61 +286,63 @@ func startBackgroundRefresher() {
 	}()
 }
 
-// refreshMaintenanceStatus returns true if refresh was successful, false otherwise
-func refreshMaintenanceStatus() bool {
-	// Fast path check - use atomic operation instead of locks for better performance
-	if sharedCache.refreshInProgress.Load() {
-		return true // Someone else is already refreshing, consider it successful
-	}
-
-	// Another quick check if we even need to refresh
+func refreshAllEnvironments() {
 	sharedCache.RLock()
-	needsRefresh := time.Now().After(sharedCache.expiry)
-	debug := sharedCache.debug
+	environmentEndpoints := sharedCache.environmentEndpoints
 	sharedCache.RUnlock()
 
-	if !needsRefresh {
+	for envSuffix := range environmentEndpoints {
+		refreshMaintenanceStatusForEnvironment(envSuffix)
+	}
+}
+
+func refreshMaintenanceStatusForEnvironment(envSuffix string) bool {
+	if !refreshLock.TryLock() {
 		return true
 	}
 
-	// Try to acquire refresh lock - only one goroutine will succeed
-	if !refreshLock.TryLock() {
-		if debug {
-			fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Another goroutine is already refreshing, skipping\n")
-		}
-		return true // Someone else is already refreshing, consider it successful
-	}
-
-	// Set the atomic flag IMMEDIATELY before any other operations
-	// This will block other threads at the fast path check above
-	sharedCache.refreshInProgress.Store(true)
-
-	// Release the lock at the end of this function
 	defer func() {
-		sharedCache.refreshInProgress.Store(false)
 		refreshLock.Unlock()
 	}()
 
-	// Double-check after acquiring lock
 	sharedCache.RLock()
-	stillNeedsRefresh := time.Now().After(sharedCache.expiry)
-	endpoint := sharedCache.endpoint
 	client := sharedCache.client
 	requestTimeout := sharedCache.requestTimeout
 	userAgent := sharedCache.userAgent
 	cacheDuration := sharedCache.cacheDuration
-	currentFailedAttempts := sharedCache.failedAttempts
-	sharedCache.RUnlock()
+	debug := sharedCache.debug
 
-	if !stillNeedsRefresh {
-		if debug {
-			fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Refresh no longer needed after acquiring lock\n")
+	envCache, exists := sharedCache.environments[envSuffix]
+	if !exists {
+		envCache = &EnvironmentCache{
+			expiry: time.Now().Add(-1 * time.Minute),
 		}
-		return true // No refresh needed, consider it successful
+	}
+	needsRefresh := time.Now().After(envCache.expiry)
+	currentFailedAttempts := envCache.failedAttempts
+
+	var secretHeader, secretHeaderValue string
+	if envSecret, exists := sharedCache.environmentSecrets[envSuffix]; exists {
+		secretHeader = envSecret.Header
+		secretHeaderValue = envSecret.Value
+	} else if sharedCache.secretHeader != "" && sharedCache.secretHeaderValue != "" {
+		secretHeader = sharedCache.secretHeader
+		secretHeaderValue = sharedCache.secretHeaderValue
 	}
 
+	sharedCache.RUnlock()
+
+	if !needsRefresh {
+		if debug {
+			fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Environment '%s' cache is still valid, skipping refresh\n", envSuffix)
+		}
+		return true
+	}
+
+	endpoint := getEndpointForDomain(envSuffix)
+
 	if debug {
-		fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Fetching maintenance status from '%s'\n", endpoint)
+		fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Fetching maintenance status from '%s' for environment '%s'\n", endpoint, envSuffix)
 	}
 
 	if client == nil {
@@ -354,61 +361,31 @@ func refreshMaintenanceStatus() bool {
 			fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Error creating request: %v\n", err)
 		}
 
-		// Use exponential backoff for retries on failure
 		backoffTime := calculateBackoff(currentFailedAttempts)
-
-		sharedCache.Lock()
-		sharedCache.failedAttempts++
-		sharedCache.expiry = time.Now().Add(backoffTime)
-		sharedCache.Unlock()
-
-		if debug {
-			fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Using backoff: %v, next retry at %v\n",
-				backoffTime, time.Now().Add(backoffTime))
-		}
-
+		updateEnvironmentCache(envSuffix, nil, backoffTime, currentFailedAttempts+1, false)
 		return false
 	}
 
 	req.Header.Set("User-Agent", userAgent)
 
-	// Add secret header if configured
-	sharedCache.RLock()
-	secretHeader := sharedCache.secretHeader
-	secretHeaderValue := sharedCache.secretHeaderValue
-	sharedCache.RUnlock()
-
 	if secretHeader != "" && secretHeaderValue != "" {
 		req.Header.Set(secretHeader, secretHeaderValue)
 		if debug {
-			fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Added secret header '%s' for plugin identification\n", secretHeader)
+			fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Added secret header '%s' for environment '%s'\n", secretHeader, envSuffix)
 		}
 	}
 
-	var resp *http.Response
-	resp, err = client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		if debug {
 			fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Error making request: %v\n", err)
 		}
 
-		// Use exponential backoff for retries on failure
 		backoffTime := calculateBackoff(currentFailedAttempts)
-
-		sharedCache.Lock()
-		sharedCache.failedAttempts++
-		sharedCache.expiry = time.Now().Add(backoffTime)
-		sharedCache.Unlock()
-
-		if debug {
-			fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Using backoff: %v, next retry at %v\n",
-				backoffTime, time.Now().Add(backoffTime))
-		}
-
+		updateEnvironmentCache(envSuffix, nil, backoffTime, currentFailedAttempts+1, false)
 		return false
 	}
 
-	// Ensure body is always closed
 	if resp != nil && resp.Body != nil {
 		defer func() {
 			err := resp.Body.Close()
@@ -424,43 +401,23 @@ func refreshMaintenanceStatus() bool {
 		}
 
 		backoffTime := calculateBackoff(currentFailedAttempts)
-
-		sharedCache.Lock()
-		sharedCache.failedAttempts++
-		sharedCache.expiry = time.Now().Add(backoffTime)
-		sharedCache.Unlock()
-
+		updateEnvironmentCache(envSuffix, nil, backoffTime, currentFailedAttempts+1, false)
 		return false
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		err = fmt.Errorf("API returned status code: %d", resp.StatusCode)
 		if debug {
-			fmt.Fprintf(os.Stdout, "[MaintenanceCheck] %v\n", err)
+			fmt.Fprintf(os.Stdout, "[MaintenanceCheck] API returned status code: %d\n", resp.StatusCode)
 		}
 
-		// Use exponential backoff for retries on failure
 		backoffTime := calculateBackoff(currentFailedAttempts)
-
-		sharedCache.Lock()
-		sharedCache.failedAttempts++
-		sharedCache.expiry = time.Now().Add(backoffTime)
-		sharedCache.Unlock()
-
-		if debug {
-			fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Using backoff: %v, next retry at %v\n",
-				backoffTime, time.Now().Add(backoffTime))
-		}
-
+		updateEnvironmentCache(envSuffix, nil, backoffTime, currentFailedAttempts+1, false)
 		return false
 	}
 
-	// Limit size of response body to prevent memory exhaustion
-	// Usually JSON responses are small, but adding protection against DoS
-	const maxResponseSize = 10 * 1024 * 1024 // 10 MB
+	const maxResponseSize = 10 * 1024 * 1024
 	limitedReader := http.MaxBytesReader(nil, resp.Body, maxResponseSize)
 
-	// Parse response
 	var result MaintenanceResponse
 	decoder := json.NewDecoder(limitedReader)
 	if err := decoder.Decode(&result); err != nil {
@@ -468,44 +425,95 @@ func refreshMaintenanceStatus() bool {
 			fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Error parsing JSON: %v\n", err)
 		}
 
-		// Use exponential backoff for retries on failure
 		backoffTime := calculateBackoff(currentFailedAttempts)
-
-		sharedCache.Lock()
-		sharedCache.failedAttempts++
-		sharedCache.expiry = time.Now().Add(backoffTime)
-		sharedCache.Unlock()
-
-		if debug {
-			fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Using backoff: %v, next retry at %v\n",
-				backoffTime, time.Now().Add(backoffTime))
-		}
-
+		updateEnvironmentCache(envSuffix, nil, backoffTime, currentFailedAttempts+1, false)
 		return false
 	}
 
 	isActive := result.SystemConfig.Maintenance.IsActive
 	whitelist := result.SystemConfig.Maintenance.Whitelist
 
-	// Make a copy of the whitelist to avoid potential race conditions
-	// if the original slice is modified externally
 	whitelistCopy := make([]string, len(whitelist))
 	copy(whitelistCopy, whitelist)
 
-	sharedCache.Lock()
-	sharedCache.isActive = isActive
-	sharedCache.whitelist = whitelistCopy
-	sharedCache.expiry = time.Now().Add(cacheDuration)
-	sharedCache.failedAttempts = 0 // Reset failed attempts counter on success
-	sharedCache.lastSuccessfulFetch = time.Now()
-	sharedCache.Unlock()
+	updateEnvironmentCache(envSuffix, &MaintenanceResponse{result.SystemConfig}, cacheDuration, 0, true)
 
 	if debug {
-		fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Successfully updated shared maintenance status: active=%v, whitelist count=%d\n",
-			isActive, len(whitelist))
+		fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Successfully updated maintenance status for environment '%s': active=%v, whitelist count=%d\n",
+			envSuffix, isActive, len(whitelist))
 	}
 
 	return true
+}
+
+func updateEnvironmentCache(envSuffix string, result *MaintenanceResponse, duration time.Duration, failedAttempts int, success bool) {
+	sharedCache.Lock()
+	defer sharedCache.Unlock()
+
+	if sharedCache.environments == nil {
+		sharedCache.environments = make(map[string]*EnvironmentCache)
+	}
+
+	envCache, exists := sharedCache.environments[envSuffix]
+	if !exists {
+		envCache = &EnvironmentCache{}
+		sharedCache.environments[envSuffix] = envCache
+	}
+
+	if success && result != nil {
+		envCache.isActive = result.SystemConfig.Maintenance.IsActive
+		envCache.whitelist = make([]string, len(result.SystemConfig.Maintenance.Whitelist))
+		copy(envCache.whitelist, result.SystemConfig.Maintenance.Whitelist)
+		envCache.expiry = time.Now().Add(duration)
+		envCache.failedAttempts = 0
+		envCache.lastSuccessfulFetch = time.Now()
+	} else {
+		envCache.expiry = time.Now().Add(duration)
+		envCache.failedAttempts = failedAttempts
+	}
+}
+
+func getMaintenanceStatusForDomain(domain string) (bool, []string) {
+	sharedCache.RLock()
+	defer sharedCache.RUnlock()
+
+	if !sharedCache.initialized {
+		return false, []string{}
+	}
+
+	var envSuffix string
+	for suffix := range sharedCache.environmentEndpoints {
+		if suffix == "" {
+			continue
+		}
+		if strings.HasSuffix(domain, suffix) {
+			envSuffix = suffix
+			break
+		}
+	}
+
+	if envSuffix == "" {
+		envSuffix = ""
+	}
+
+	envCache, exists := sharedCache.environments[envSuffix]
+	if !exists {
+		return false, []string{}
+	}
+
+	if sharedCache.debug {
+		fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Using cached status for environment '%s' (domain: %s): active=%v, whitelist count=%d\n",
+			envSuffix, domain, envCache.isActive, len(envCache.whitelist))
+	}
+
+	whitelistCopy := make([]string, len(envCache.whitelist))
+	copy(whitelistCopy, envCache.whitelist)
+
+	return envCache.isActive, whitelistCopy
+}
+
+func getMaintenanceStatus() (bool, []string) {
+	return false, []string{}
 }
 
 // calculateBackoff returns an exponential backoff duration with jitter
@@ -538,31 +546,27 @@ func calculateBackoff(attempts int) time.Duration {
 	return jitter
 }
 
-func getMaintenanceStatus() (bool, []string) {
+func getEndpointForDomain(domain string) string {
 	sharedCache.RLock()
 	defer sharedCache.RUnlock()
 
-	if !sharedCache.initialized {
-		return false, []string{}
+	for suffix, endpoint := range sharedCache.environmentEndpoints {
+		if suffix == "" {
+			continue
+		}
+		if strings.HasSuffix(domain, suffix) {
+			return endpoint
+		}
 	}
 
-	if sharedCache.debug {
-		fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Using shared cached status: active=%v, whitelist count=%d\n",
-			sharedCache.isActive, len(sharedCache.whitelist))
+	if defaultEndpoint, exists := sharedCache.environmentEndpoints[""]; exists {
+		return defaultEndpoint
 	}
 
-	// Create a copy of the whitelist to protect against potential race conditions
-	whitelistCopy := make([]string, len(sharedCache.whitelist))
-	copy(whitelistCopy, sharedCache.whitelist)
-
-	return sharedCache.isActive, whitelistCopy
+	return "http://admin-service.admin/admin/api/system-config/?format=json"
 }
 
 func New(ctx context.Context, next http.Handler, config *Config, name string) (http.Handler, error) {
-	if config.Endpoint == "" {
-		return nil, errors.New("endpoint is required")
-	}
-
 	if config.MaintenanceStatusCode < 100 || config.MaintenanceStatusCode > 599 {
 		return nil, fmt.Errorf("invalid maintenance status code: %d (must be between 100-599)",
 			config.MaintenanceStatusCode)
@@ -572,7 +576,6 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 	requestTimeout := time.Duration(config.RequestTimeoutInSeconds) * time.Second
 	userAgent := fmt.Sprintf("TraefikMaintenancePlugin/%s", name)
 
-	// Ensure cache duration and request timeout are sane
 	if cacheDuration <= 0 {
 		cacheDuration = 10 * time.Second
 	}
@@ -581,10 +584,18 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 		requestTimeout = 5 * time.Second
 	}
 
-	// Initialize the shared cache if needed
-	ensureSharedCacheInitialized(config.Endpoint, cacheDuration, requestTimeout, config.Debug, userAgent, config.SecretHeader, config.SecretHeaderValue)
+	environmentEndpoints := config.EnvironmentEndpoints
+	if len(environmentEndpoints) == 0 {
+		environmentEndpoints = map[string]string{
+			".com":   "http://admin-service.admin/admin/api/system-config/?format=json",
+			".world": "http://admin-service.stage-admin/admin/api/system-config/?format=json",
+			".pro":   "http://admin-service.develop-admin/admin/api/system-config/?format=json",
+			"":       "http://admin-service.admin/admin/api/system-config/?format=json",
+		}
+	}
 
-	// Make deep copies of slices to prevent modifications
+	ensureSharedCacheInitialized(environmentEndpoints, config.EnvironmentSecrets, cacheDuration, requestTimeout, config.Debug, userAgent, config.SecretHeader, config.SecretHeaderValue)
+
 	skipPrefixesCopy := make([]string, len(config.SkipPrefixes))
 	copy(skipPrefixesCopy, config.SkipPrefixes)
 
@@ -599,7 +610,6 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 		debug:                 config.Debug,
 	}
 
-	// Cleanup handler
 	go func() {
 		<-ctx.Done()
 		if config.Debug {
@@ -644,7 +654,7 @@ func (m *MaintenanceCheck) ServeHTTP(rw http.ResponseWriter, req *http.Request) 
 		return
 	}
 
-	isActive, whitelist := getMaintenanceStatus()
+	isActive, whitelist := getMaintenanceStatusForDomain(normalizedHost)
 	if m.debug {
 		fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Maintenance status: active=%v, whitelist=%v\n", isActive, whitelist)
 	}
@@ -670,7 +680,7 @@ func (m *MaintenanceCheck) handleCORSPreflightRequest(rw http.ResponseWriter, re
 		return false
 	}
 
-	isActive, whitelist := getMaintenanceStatus()
+	isActive, whitelist := getMaintenanceStatusForDomain(req.Host)
 	if !isActive {
 		return false
 	}
@@ -710,7 +720,7 @@ func (m *MaintenanceCheck) setCORSPreflightHeaders(rw http.ResponseWriter, origi
 }
 
 func (m *MaintenanceCheck) isMaintenanceActiveForClient(req *http.Request) bool {
-	isActive, whitelist := getMaintenanceStatus()
+	isActive, whitelist := getMaintenanceStatusForDomain(req.Host)
 	return isActive && !m.isClientAllowed(req, whitelist)
 }
 
@@ -1041,6 +1051,50 @@ func CloseSharedCache() {
 			}
 		}
 	})
+}
+
+// ResetSharedCacheForTesting resets all shared state for testing
+func ResetSharedCacheForTesting() {
+	initLock.Lock()
+	defer initLock.Unlock()
+
+	if sharedCache.initialized && sharedCache.stopCh != nil {
+		close(sharedCache.stopCh)
+
+		time.Sleep(300 * time.Millisecond)
+
+		maxWait := 1 * time.Second
+		startTime := time.Now()
+		for time.Since(startTime) < maxWait {
+			sharedCache.RLock()
+			isRunning := sharedCache.refresherRunning
+			sharedCache.RUnlock()
+
+			if !isRunning {
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+
+	sharedCache = struct {
+		sync.RWMutex
+		environments         map[string]*EnvironmentCache
+		environmentEndpoints map[string]string
+		environmentSecrets   map[string]EnvironmentSecret
+		cacheDuration        time.Duration
+		requestTimeout       time.Duration
+		client               *http.Client
+		debug                bool
+		initialized          bool
+		refresherRunning     bool
+		stopCh               chan struct{}
+		userAgent            string
+		secretHeader         string
+		secretHeaderValue    string
+	}{}
+
+	shutdownOnce = sync.Once{}
 }
 
 // isCIDRMatch checks if an IP is contained within a CIDR range

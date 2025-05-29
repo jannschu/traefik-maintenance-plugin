@@ -62,8 +62,8 @@ func setupTestServer() (*httptest.Server, string, string, string, string) {
 
 func TestMaintenanceCheck(t *testing.T) {
 	// Reset shared state between tests
-	plugin.CloseSharedCache()
-	time.Sleep(500 * time.Millisecond)
+	plugin.ResetSharedCacheForTesting()
+	time.Sleep(100 * time.Millisecond)
 
 	ts, regularEndpoint, activeEndpoint, wildcardEndpoint, specificIPEndpoint := setupTestServer()
 	defer ts.Close()
@@ -246,16 +246,17 @@ func TestMaintenanceCheck(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Reset shared state between tests
-			plugin.CloseSharedCache()
+			plugin.ResetSharedCacheForTesting()
 			time.Sleep(100 * time.Millisecond)
 
 			cfg := plugin.CreateConfig()
-			cfg.Endpoint = tt.endpoint
+			cfg.EnvironmentEndpoints = map[string]string{"": tt.endpoint}
 			cfg.CacheDurationInSeconds = tt.cacheDurationInSeconds
 			cfg.RequestTimeoutInSeconds = tt.requestTimeoutInSeconds
 			cfg.SkipPrefixes = tt.skipPrefixes
 			cfg.SkipHosts = tt.skipHosts
 			cfg.MaintenanceStatusCode = tt.maintenanceStatusCode
+			cfg.Debug = false
 
 			next := http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
 				rw.WriteHeader(http.StatusOK)
@@ -267,7 +268,7 @@ func TestMaintenanceCheck(t *testing.T) {
 			}
 
 			// Allow time for initial fetch to complete
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(200 * time.Millisecond)
 
 			req := httptest.NewRequest(http.MethodGet, "http://localhost"+tt.urlPath, nil)
 
@@ -296,7 +297,7 @@ func TestMaintenanceCheck(t *testing.T) {
 
 func TestMaintenanceCheckEdgeCases(t *testing.T) {
 	// Reset shared state between tests
-	plugin.CloseSharedCache()
+	plugin.ResetSharedCacheForTesting()
 	time.Sleep(100 * time.Millisecond)
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -360,11 +361,11 @@ func TestMaintenanceCheckEdgeCases(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Reset shared state between tests
-			plugin.CloseSharedCache()
+			plugin.ResetSharedCacheForTesting()
 			time.Sleep(100 * time.Millisecond)
 
 			cfg := plugin.CreateConfig()
-			cfg.Endpoint = tt.endpoint
+			cfg.EnvironmentEndpoints = map[string]string{"": tt.endpoint}
 			cfg.CacheDurationInSeconds = tt.cacheDurationInSeconds
 			cfg.RequestTimeoutInSeconds = tt.requestTimeoutInSeconds
 
@@ -380,11 +381,11 @@ func TestMaintenanceCheckEdgeCases(t *testing.T) {
 			// First, make a normal request to cache the response
 			if tt.name == "Timeout handling" {
 				// Use a fast endpoint to pre-populate the cache with maintenance inactive
-				plugin.CloseSharedCache()
+				plugin.ResetSharedCacheForTesting()
 				time.Sleep(100 * time.Millisecond)
 
 				fastCfg := plugin.CreateConfig()
-				fastCfg.Endpoint = ts.URL // Use fast endpoint temporarily
+				fastCfg.EnvironmentEndpoints = map[string]string{"": ts.URL} // Use fast endpoint temporarily
 				fastCfg.CacheDurationInSeconds = 10
 				fastCfg.RequestTimeoutInSeconds = 5
 
@@ -397,7 +398,7 @@ func TestMaintenanceCheckEdgeCases(t *testing.T) {
 				time.Sleep(100 * time.Millisecond)
 
 				// Now create the handler with the original endpoint
-				plugin.CloseSharedCache()
+				plugin.ResetSharedCacheForTesting()
 				time.Sleep(100 * time.Millisecond)
 
 				handler, err = plugin.New(context.Background(), next, cfg, "maintenance-test")
@@ -426,7 +427,7 @@ func TestMaintenanceCheckEdgeCases(t *testing.T) {
 
 func TestCacheWarmup(t *testing.T) {
 	// Reset shared state
-	plugin.CloseSharedCache()
+	plugin.ResetSharedCacheForTesting()
 	time.Sleep(100 * time.Millisecond)
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -439,7 +440,7 @@ func TestCacheWarmup(t *testing.T) {
 	defer ts.Close()
 
 	cfg := plugin.CreateConfig()
-	cfg.Endpoint = ts.URL
+	cfg.EnvironmentEndpoints = map[string]string{"": ts.URL}
 	cfg.CacheDurationInSeconds = 10
 	cfg.RequestTimeoutInSeconds = 5
 
@@ -459,7 +460,7 @@ func TestCacheWarmup(t *testing.T) {
 
 func TestInvalidConfig(t *testing.T) {
 	cfg := plugin.CreateConfig()
-	// Endpoint is required but not provided
+	cfg.MaintenanceStatusCode = 99 // Invalid status code (too low)
 
 	next := http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
 		rw.WriteHeader(http.StatusOK)
@@ -467,13 +468,13 @@ func TestInvalidConfig(t *testing.T) {
 
 	_, err := plugin.New(context.Background(), next, cfg, "maintenance-test")
 	if err == nil {
-		t.Error("Expected error for missing endpoint, but got none")
+		t.Error("Expected error for invalid status code, but got none")
 	}
 }
 
 func TestSingletonPattern(t *testing.T) {
 	// Reset shared state
-	plugin.CloseSharedCache()
+	plugin.ResetSharedCacheForTesting()
 	time.Sleep(100 * time.Millisecond)
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -487,10 +488,10 @@ func TestSingletonPattern(t *testing.T) {
 	defer ts.Close()
 
 	cfg := plugin.CreateConfig()
-	cfg.Endpoint = ts.URL
+	cfg.EnvironmentEndpoints = map[string]string{"": ts.URL}
 	cfg.CacheDurationInSeconds = 10
 	cfg.RequestTimeoutInSeconds = 5
-	cfg.Debug = true
+	cfg.Debug = false
 
 	next := http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
 		rw.WriteHeader(http.StatusOK)
@@ -507,7 +508,7 @@ func TestSingletonPattern(t *testing.T) {
 	}
 
 	// Allow time for cache warmup
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 
 	// Make a request to each handler
 	for i, handler := range handlers {
@@ -525,7 +526,7 @@ func TestSingletonPattern(t *testing.T) {
 
 func TestConcurrentRequests(t *testing.T) {
 	// Reset shared state
-	plugin.CloseSharedCache()
+	plugin.ResetSharedCacheForTesting()
 	time.Sleep(100 * time.Millisecond)
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -539,11 +540,11 @@ func TestConcurrentRequests(t *testing.T) {
 	defer ts.Close()
 
 	cfg := plugin.CreateConfig()
-	cfg.Endpoint = ts.URL
+	cfg.EnvironmentEndpoints = map[string]string{"": ts.URL}
 	cfg.CacheDurationInSeconds = 1
 	cfg.RequestTimeoutInSeconds = 5
 	cfg.MaintenanceStatusCode = 503
-	cfg.Debug = true
+	cfg.Debug = false
 
 	next := http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
 		rw.WriteHeader(http.StatusOK)
@@ -599,8 +600,8 @@ func TestConcurrentRequests(t *testing.T) {
 
 func TestBackoffRetry(t *testing.T) {
 	// Reset shared state
-	plugin.CloseSharedCache()
-	time.Sleep(200 * time.Millisecond)
+	plugin.ResetSharedCacheForTesting()
+	time.Sleep(100 * time.Millisecond)
 
 	// Count successful API calls directly to the test server
 	var requestCount int32
@@ -638,7 +639,7 @@ func TestBackoffRetry(t *testing.T) {
 			t.Fatalf("Failed to make request %d: %v", i, err)
 		}
 		resp.Body.Close()
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 	}
 
 	// Verify the correct number of requests were made
@@ -648,10 +649,10 @@ func TestBackoffRetry(t *testing.T) {
 
 	// Now create and test the middleware with the preconditioned server
 	cfg := plugin.CreateConfig()
-	cfg.Endpoint = ts.URL
+	cfg.EnvironmentEndpoints = map[string]string{"": ts.URL}
 	cfg.CacheDurationInSeconds = 1
 	cfg.RequestTimeoutInSeconds = 1
-	cfg.Debug = true
+	cfg.Debug = false
 
 	next := http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
 		rw.WriteHeader(http.StatusOK)
@@ -663,7 +664,7 @@ func TestBackoffRetry(t *testing.T) {
 	}
 
 	// Allow time for initial fetch to complete
-	time.Sleep(300 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 
 	// Make a request to test the middleware
 	req := httptest.NewRequest(http.MethodGet, "http://localhost/", nil)
@@ -684,8 +685,8 @@ func TestBackoffRetry(t *testing.T) {
 
 func TestSharedCacheBetweenInstances(t *testing.T) {
 	// Reset shared state before test
-	plugin.CloseSharedCache()
-	time.Sleep(200 * time.Millisecond)
+	plugin.ResetSharedCacheForTesting()
+	time.Sleep(100 * time.Millisecond)
 
 	// Track API requests to ensure only one request is made
 	// regardless of how many middleware instances exist
@@ -708,11 +709,11 @@ func TestSharedCacheBetweenInstances(t *testing.T) {
 
 	// Create base configuration
 	cfg := plugin.CreateConfig()
-	cfg.Endpoint = ts.URL
+	cfg.EnvironmentEndpoints = map[string]string{"": ts.URL}
 	cfg.CacheDurationInSeconds = 30 // Use a longer duration to ensure cache is valid throughout test
 	cfg.RequestTimeoutInSeconds = 5
 	cfg.MaintenanceStatusCode = 503
-	cfg.Debug = true
+	cfg.Debug = false
 
 	// Handler that will count how many times it's called
 	var nextHandlerCallCount int32
@@ -736,7 +737,7 @@ func TestSharedCacheBetweenInstances(t *testing.T) {
 	}
 
 	// Give time for initial fetch to complete
-	time.Sleep(300 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 
 	// Verify only one API request was made despite creating multiple handlers
 	initialRequestCount := atomic.LoadInt32(&requestCount)
@@ -795,15 +796,15 @@ func TestSharedCacheBetweenInstances(t *testing.T) {
 
 func TestIPDetectionFromMultipleHeaders(t *testing.T) {
 	// Reset shared state between tests
-	plugin.CloseSharedCache()
+	plugin.ResetSharedCacheForTesting()
 	time.Sleep(100 * time.Millisecond)
 
 	ts, regularEndpoint, _, _, _ := setupTestServer()
 	defer ts.Close()
 
 	cfg := plugin.CreateConfig()
-	cfg.Endpoint = regularEndpoint
-	cfg.Debug = true
+	cfg.EnvironmentEndpoints = map[string]string{"": regularEndpoint}
+	cfg.Debug = false
 
 	next := http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
 		rw.WriteHeader(http.StatusOK)
@@ -815,7 +816,7 @@ func TestIPDetectionFromMultipleHeaders(t *testing.T) {
 	}
 
 	// Allow time for initial fetch to complete
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(200 * time.Millisecond)
 
 	tests := []struct {
 		name           string
@@ -939,7 +940,7 @@ func TestIPDetectionFromMultipleHeaders(t *testing.T) {
 
 func TestCIDRWhitelist(t *testing.T) {
 	// Reset shared state between tests
-	plugin.CloseSharedCache()
+	plugin.ResetSharedCacheForTesting()
 	time.Sleep(100 * time.Millisecond)
 
 	// Create custom test server with CIDR whitelist
@@ -963,11 +964,11 @@ func TestCIDRWhitelist(t *testing.T) {
 	cidrEndpoint := ts.URL + "/maintenance-active-cidr"
 
 	cfg := plugin.CreateConfig()
-	cfg.Endpoint = cidrEndpoint
+	cfg.EnvironmentEndpoints = map[string]string{"": cidrEndpoint}
 	cfg.CacheDurationInSeconds = 10
 	cfg.RequestTimeoutInSeconds = 5
 	cfg.MaintenanceStatusCode = 503
-	cfg.Debug = true
+	cfg.Debug = false
 
 	next := http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
 		rw.WriteHeader(http.StatusOK)
@@ -979,7 +980,7 @@ func TestCIDRWhitelist(t *testing.T) {
 	}
 
 	// Allow time for initial fetch to complete
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(200 * time.Millisecond)
 
 	tests := []struct {
 		name           string
@@ -1039,7 +1040,7 @@ func TestCIDRWhitelist(t *testing.T) {
 
 func TestKubernetesEnvironment(t *testing.T) {
 	// Reset shared state between tests
-	plugin.CloseSharedCache()
+	plugin.ResetSharedCacheForTesting()
 	time.Sleep(100 * time.Millisecond)
 
 	// Set up test server with active maintenance mode
@@ -1055,11 +1056,11 @@ func TestKubernetesEnvironment(t *testing.T) {
 	defer ts.Close()
 
 	cfg := plugin.CreateConfig()
-	cfg.Endpoint = ts.URL
+	cfg.EnvironmentEndpoints = map[string]string{"": ts.URL}
 	cfg.CacheDurationInSeconds = 10
 	cfg.RequestTimeoutInSeconds = 5
 	cfg.MaintenanceStatusCode = 503
-	cfg.Debug = true
+	cfg.Debug = false
 
 	next := http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
 		rw.WriteHeader(http.StatusOK)
@@ -1071,7 +1072,7 @@ func TestKubernetesEnvironment(t *testing.T) {
 	}
 
 	// Allow time for initial fetch to complete
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(200 * time.Millisecond)
 
 	tests := []struct {
 		name           string
@@ -1171,7 +1172,7 @@ func TestKubernetesEnvironment(t *testing.T) {
 
 func TestInvalidIPAndCIDRHandling(t *testing.T) {
 	// Reset shared state between tests
-	plugin.CloseSharedCache()
+	plugin.ResetSharedCacheForTesting()
 	time.Sleep(100 * time.Millisecond)
 
 	// Create custom test server with invalid whitelist entries
@@ -1201,11 +1202,11 @@ func TestInvalidIPAndCIDRHandling(t *testing.T) {
 	invalidEndpoint := ts.URL + "/maintenance-active-invalid-cidr"
 
 	cfg := plugin.CreateConfig()
-	cfg.Endpoint = invalidEndpoint
+	cfg.EnvironmentEndpoints = map[string]string{"": invalidEndpoint}
 	cfg.CacheDurationInSeconds = 10
 	cfg.RequestTimeoutInSeconds = 5
 	cfg.MaintenanceStatusCode = 503
-	cfg.Debug = true
+	cfg.Debug = false
 
 	next := http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
 		rw.WriteHeader(http.StatusOK)
@@ -1217,7 +1218,7 @@ func TestInvalidIPAndCIDRHandling(t *testing.T) {
 	}
 
 	// Allow time for initial fetch to complete
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(200 * time.Millisecond)
 
 	tests := []struct {
 		name           string
@@ -1280,7 +1281,7 @@ func TestInvalidIPAndCIDRHandling(t *testing.T) {
 
 func TestSecretHeaderFunctionality(t *testing.T) {
 	// Reset shared state between tests
-	plugin.CloseSharedCache()
+	plugin.ResetSharedCacheForTesting()
 	time.Sleep(100 * time.Millisecond)
 
 	// Track received headers to verify plugin sends the secret header
@@ -1314,13 +1315,14 @@ func TestSecretHeaderFunctionality(t *testing.T) {
 
 	// Test with secret header configured
 	cfg := plugin.CreateConfig()
-	cfg.Endpoint = ts.URL
+	cfg.EnvironmentEndpoints = map[string]string{"": ts.URL}
+	cfg.EnvironmentSecrets = map[string]plugin.EnvironmentSecret{
+		"": {Header: "X-Plugin-Secret", Value: "test-secret-token"},
+	}
 	cfg.CacheDurationInSeconds = 10
 	cfg.RequestTimeoutInSeconds = 5
 	cfg.MaintenanceStatusCode = 503
-	cfg.SecretHeader = "X-Plugin-Secret"
-	cfg.SecretHeaderValue = "test-secret-token"
-	cfg.Debug = true
+	cfg.Debug = false
 
 	next := http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
 		rw.WriteHeader(http.StatusOK)
@@ -1374,7 +1376,7 @@ func TestSecretHeaderFunctionality(t *testing.T) {
 
 func TestCORSFunctionalityDuringMaintenance(t *testing.T) {
 	// Reset shared state between tests
-	plugin.CloseSharedCache()
+	plugin.ResetSharedCacheForTesting()
 	time.Sleep(100 * time.Millisecond)
 
 	// Set up test server with active maintenance mode
@@ -1485,15 +1487,15 @@ func TestCORSFunctionalityDuringMaintenance(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Reset shared state for each test
-			plugin.CloseSharedCache()
+			plugin.ResetSharedCacheForTesting()
 			time.Sleep(100 * time.Millisecond)
 
 			cfg := plugin.CreateConfig()
-			cfg.Endpoint = tt.endpoint
+			cfg.EnvironmentEndpoints = map[string]string{"": tt.endpoint}
 			cfg.CacheDurationInSeconds = 10
 			cfg.RequestTimeoutInSeconds = 5
 			cfg.MaintenanceStatusCode = 512
-			cfg.Debug = true
+			cfg.Debug = false
 
 			next := http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
 				rw.WriteHeader(http.StatusOK)
@@ -1505,7 +1507,7 @@ func TestCORSFunctionalityDuringMaintenance(t *testing.T) {
 			}
 
 			// Allow time for initial fetch to complete
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(200 * time.Millisecond)
 
 			// Create request
 			req := httptest.NewRequest(tt.method, "http://localhost/", nil)
@@ -1582,6 +1584,202 @@ func TestCORSFunctionalityDuringMaintenance(t *testing.T) {
 
 			if t.Failed() {
 				t.Logf("Response headers: %+v", response.Header)
+			}
+		})
+	}
+}
+
+func TestProductionComDomainSupport(t *testing.T) {
+	plugin.ResetSharedCacheForTesting()
+	time.Sleep(100 * time.Millisecond)
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		response := maintenanceResponse{}
+
+		switch r.URL.Path {
+		case "/prod-maintenance-active":
+			response.SystemConfig.Maintenance.IsActive = true
+			response.SystemConfig.Maintenance.Whitelist = []string{"203.0.113.0/24"} // Production IP range
+		case "/prod-maintenance-inactive":
+			response.SystemConfig.Maintenance.IsActive = false
+		default:
+			response.SystemConfig.Maintenance.IsActive = false
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
+	}))
+	defer ts.Close()
+
+	tests := []struct {
+		name            string
+		customEndpoints map[string]string
+		testDomain      string
+		clientIP        string
+		expectedStatus  int
+		description     string
+	}{
+		{
+			name: "Production .com domain with custom endpoint",
+			customEndpoints: map[string]string{
+				".com": ts.URL + "/prod-maintenance-active",
+				"":     ts.URL + "/prod-maintenance-inactive", // default fallback
+			},
+			testDomain:     "api.citronus.com",
+			clientIP:       "203.0.113.100", // In whitelist range
+			expectedStatus: http.StatusOK,
+			description:    "Should route .com domain to custom production endpoint and allow whitelisted IP",
+		},
+		{
+			name: "Production .com domain - blocked IP",
+			customEndpoints: map[string]string{
+				".com": ts.URL + "/prod-maintenance-active",
+				"":     ts.URL + "/prod-maintenance-inactive",
+			},
+			testDomain:     "portal.citronus.com",
+			clientIP:       "10.0.0.1", // Not in whitelist
+			expectedStatus: 512,
+			description:    "Should route .com domain to custom production endpoint and block non-whitelisted IP",
+		},
+		{
+			name: "Non-.com domain uses default endpoint",
+			customEndpoints: map[string]string{
+				".com": ts.URL + "/prod-maintenance-active",
+				"":     ts.URL + "/prod-maintenance-inactive",
+			},
+			testDomain:     "test.example.org",
+			clientIP:       "10.0.0.1",
+			expectedStatus: http.StatusOK,
+			description:    "Should use default endpoint for domains that don't match .com",
+		},
+		{
+			name: "Multiple custom domains",
+			customEndpoints: map[string]string{
+				".com":   ts.URL + "/prod-maintenance-active",
+				".local": ts.URL + "/prod-maintenance-inactive",
+				".dev":   ts.URL + "/prod-maintenance-inactive",
+				"":       ts.URL + "/prod-maintenance-inactive",
+			},
+			testDomain:     "staging.citronus.local",
+			clientIP:       "192.168.1.1",
+			expectedStatus: http.StatusOK,
+			description:    "Should support multiple custom domain endpoints",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			plugin.ResetSharedCacheForTesting()
+			time.Sleep(100 * time.Millisecond)
+
+			cfg := plugin.CreateConfig()
+			cfg.EnvironmentEndpoints = tt.customEndpoints
+			cfg.CacheDurationInSeconds = 10
+			cfg.RequestTimeoutInSeconds = 5
+			cfg.MaintenanceStatusCode = 512
+			cfg.Debug = false
+
+			next := http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+				rw.WriteHeader(http.StatusOK)
+			})
+
+			handler, err := plugin.New(context.Background(), next, cfg, "prod-com-test")
+			if err != nil {
+				t.Fatalf("Error creating plugin: %v", err)
+			}
+
+			time.Sleep(200 * time.Millisecond)
+
+			req := httptest.NewRequest(http.MethodGet, "http://"+tt.testDomain+"/", nil)
+			req.Host = tt.testDomain
+
+			if tt.clientIP != "" {
+				req.Header.Set("X-Forwarded-For", tt.clientIP)
+			}
+
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, req)
+
+			response := recorder.Result()
+			defer response.Body.Close()
+
+			if response.StatusCode != tt.expectedStatus {
+				t.Errorf("%s: Expected status code %d, got %d", tt.description, tt.expectedStatus, response.StatusCode)
+			}
+		})
+	}
+}
+
+func TestConfigurationOverridesBehavior(t *testing.T) {
+	plugin.ResetSharedCacheForTesting()
+	time.Sleep(100 * time.Millisecond)
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		response := maintenanceResponse{}
+		response.SystemConfig.Maintenance.IsActive = false
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
+	}))
+	defer ts.Close()
+
+	cfg := plugin.CreateConfig()
+	cfg.EnvironmentEndpoints = map[string]string{
+		".production": ts.URL,
+		".staging":    ts.URL,
+		"":            ts.URL,
+	}
+
+	next := http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		rw.WriteHeader(http.StatusOK)
+	})
+
+	handler, err := plugin.New(context.Background(), next, cfg, "config-override-test")
+	if err != nil {
+		t.Fatalf("Error creating plugin: %v", err)
+	}
+
+	time.Sleep(200 * time.Millisecond)
+
+	tests := []struct {
+		domain         string
+		expectedStatus int
+		description    string
+	}{
+		{
+			domain:         "app.citronus.production",
+			expectedStatus: http.StatusOK,
+			description:    "Custom .production domain should work",
+		},
+		{
+			domain:         "test.citronus.staging",
+			expectedStatus: http.StatusOK,
+			description:    "Custom .staging domain should work",
+		},
+		{
+			domain:         "legacy.citronus.com",
+			expectedStatus: http.StatusOK,
+			description:    "Non-matching domain should use default endpoint",
+		},
+		{
+			domain:         "dev.citronus.world",
+			expectedStatus: http.StatusOK,
+			description:    "Previously hardcoded .world should now use default endpoint",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.description, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "http://"+tt.domain+"/", nil)
+			req.Host = tt.domain
+
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, req)
+
+			response := recorder.Result()
+			defer response.Body.Close()
+
+			if response.StatusCode != tt.expectedStatus {
+				t.Errorf("%s: Expected status code %d, got %d", tt.description, tt.expectedStatus, response.StatusCode)
 			}
 		})
 	}

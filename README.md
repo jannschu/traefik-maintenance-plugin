@@ -66,7 +66,20 @@ metadata:
 spec:
   plugin:
     maintenanceCheck:
-      endpoint: http://your-maintenance-api-service/maintenance
+      environmentEndpoints:
+        ".world": "http://admin-service.stage-admin/admin/api/system-config/?format=json"
+        ".pro": "http://admin-service.develop-admin/admin/api/system-config/?format=json"
+        "": "http://admin-service.admin/admin/api/system-config/?format=json"
+      environmentSecrets:
+        ".world":
+          header: "X-Plugin-Secret"
+          value: "stage-secret-token"
+        ".pro":
+          header: "X-Plugin-Secret"
+          value: "develop-secret-token"
+        "":
+          header: "X-Plugin-Secret"
+          value: "admin-secret-token"
       cacheDurationInSeconds: 60
       requestTimeoutInSeconds: 5
       skipPrefixes:      # optional URL prefixes to bypass maintenance checks
@@ -78,9 +91,82 @@ spec:
         - *.internal.example.com
       maintenanceStatusCode: 512  # HTTP status code when in maintenance
       debug: false       # set to true to enable detailed logging
-      secretHeader: "X-Plugin-Secret"      # optional header name for plugin identification
-      secretHeaderValue: "your-secret-key" # optional header value for plugin identification
 ```
+
+### Helm Configuration Example
+
+```yaml
+# values.yaml
+traefik:
+  additionalArguments:
+    - "--experimental.plugins.maintenanceCheck.modulename=github.com/CitronusAcademy/traefik-maintenance-plugin"
+    - "--experimental.plugins.maintenanceCheck.version=v0.1.0"
+
+middleware:
+  maintenance-check:
+    spec:
+      plugin:
+        maintenanceCheck:
+          environmentEndpoints:
+            ".world": "http://admin-service.stage-admin/admin/api/system-config/?format=json"
+            ".pro": "http://admin-service.develop-admin/admin/api/system-config/?format=json"
+            "": "http://admin-service.admin/admin/api/system-config/?format=json"
+          environmentSecrets:
+            ".world":
+              header: "X-Plugin-Secret"
+              value: "stage-secret-token"
+            ".pro":
+              header: "X-Plugin-Secret"
+              value: "develop-secret-token"
+            "":
+              header: "X-Plugin-Secret"
+              value: "admin-secret-token"
+          cacheDurationInSeconds: 60
+          requestTimeoutInSeconds: 5
+          maintenanceStatusCode: 512
+          debug: false
+```
+
+### Environment-Based Endpoint Selection
+
+The plugin automatically selects the appropriate maintenance API endpoint based on the request domain suffix. **Any domain suffix can be configured** - the plugin is not limited to specific domains and works with any configuration you provide.
+
+**Default configuration (can be completely overridden):**
+- **`.com` domains**: `http://admin-service.admin/admin/api/system-config/?format=json` (production)
+- **`.world` domains**: `http://admin-service.stage-admin/admin/api/system-config/?format=json` (staging)
+- **`.pro` domains**: `http://admin-service.develop-admin/admin/api/system-config/?format=json` (development)
+- **Other domains**: `http://admin-service.admin/admin/api/system-config/?format=json` (fallback)
+
+**Production-ready examples:**
+
+```yaml
+# Production configuration with custom domains
+environmentEndpoints:
+  ".com": "https://api.yourcompany.com/admin/api/system-config/?format=json"
+  ".staging": "https://api-staging.yourcompany.com/admin/api/system-config/?format=json"
+  ".dev": "https://api-dev.yourcompany.com/admin/api/system-config/?format=json"
+  "": "https://api.yourcompany.com/admin/api/system-config/?format=json"  # default fallback
+
+# Multiple production environments
+environmentEndpoints:
+  ".com": "https://prod-api.yourcompany.com/admin/api/system-config/?format=json"
+  ".eu": "https://eu-api.yourcompany.com/admin/api/system-config/?format=json"
+  ".asia": "https://asia-api.yourcompany.com/admin/api/system-config/?format=json"
+  "": "https://global-api.yourcompany.com/admin/api/system-config/?format=json"
+
+# Single endpoint for all domains
+environmentEndpoints:
+  "": "https://universal-api.yourcompany.com/admin/api/system-config/?format=json"
+```
+
+**Key features:**
+- ✅ **Supports any domain suffix** (`.com`, `.org`, `.net`, `.local`, `.production`, etc.)
+- ✅ **Configuration overrides defaults** - hardcoded values are only fallbacks
+- ✅ **Production-ready** with proper async handling and no race conditions
+- ✅ **Per-environment secret headers** for secure API access
+- ✅ **Separate maintenance states** per domain suffix
+
+This allows a single Traefik instance to handle multiple environments with completely separate maintenance states and API endpoints.
 
 ### API Format
 
@@ -179,7 +265,20 @@ http:
     maintenance-check:
       plugin:
         maintenance:
-          endpoint: "https://example.com/maintenance-status"
+          environmentEndpoints:
+            ".world": "http://admin-service.stage-admin/admin/api/system-config/?format=json"
+            ".pro": "http://admin-service.develop-admin/admin/api/system-config/?format=json"
+            "": "http://admin-service.admin/admin/api/system-config/?format=json"
+          environmentSecrets:
+            ".world":
+              header: "X-Plugin-Secret"
+              value: "stage-secret-token"
+            ".pro":
+              header: "X-Plugin-Secret"
+              value: "develop-secret-token"
+            "":
+              header: "X-Plugin-Secret"
+              value: "admin-secret-token"
           cacheDurationInSeconds: 10
           requestTimeoutInSeconds: 5
           skipPrefixes:
@@ -191,13 +290,11 @@ http:
             - "*.internal.example.com"
           maintenanceStatusCode: 512
           debug: false
-          secretHeader: "X-Plugin-Secret"
-          secretHeaderValue: "your-secret-key"
 ```
 
 ## Endpoint Format
 
-The plugin expects your maintenance status endpoint to return a JSON response in the following format:
+The plugin automatically queries different maintenance status endpoints based on the request domain and expects a JSON response in the following format:
 
 ```json
 {
@@ -235,15 +332,16 @@ This extensive header checking ensures the plugin works correctly in complex pro
 
 ## Parameters
 
-- `endpoint` (required): URL to check maintenance status
+- `environmentEndpoints` (optional): Map of domain suffixes to maintenance API endpoints. Default includes `.world`, `.pro`, and fallback endpoints.
+- `environmentSecrets` (optional): Map of domain suffixes to secret headers for each environment. Each entry contains `header` and `value` fields.
 - `cacheDurationInSeconds` (optional): How often the background process refreshes maintenance status, specified in seconds. Default is 10.
 - `requestTimeoutInSeconds` (optional): Timeout for API requests in seconds. Default is 5.
 - `skipPrefixes` (optional): List of URL path prefixes that should bypass maintenance checks, useful for admin interfaces. Default is empty list.
 - `maintenanceStatusCode` (optional): HTTP status code to return when in maintenance mode. Default is 512 (Service Unavailable).
 - `skipHosts` (optional): List of hostnames that should bypass maintenance checks, useful for admin interfaces, monitoring tools, etc. Supports wildcard patterns like "*.example.com". Default is empty list.
 - `debug` (optional): Enable debug logging for troubleshooting. Default is false. When enabled, detailed information about decision making will be logged to stdout.
-- `secretHeader` (optional): Name of the HTTP header that will be sent with requests to identify the plugin. This allows the server to return different responses for plugin vs frontend requests. Default is empty (no header sent).
-- `secretHeaderValue` (optional): Value of the secret header. This should be a secret known only to the server and plugin configuration. Default is empty (no header sent).
+- `secretHeader` (optional): Legacy fallback secret header name. Use `environmentSecrets` for per-environment configuration.
+- `secretHeaderValue` (optional): Legacy fallback secret header value. Use `environmentSecrets` for per-environment configuration.
 
 ## Production Readiness Features
 
