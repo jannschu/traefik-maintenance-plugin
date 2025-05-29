@@ -716,12 +716,11 @@ func (m *MaintenanceCheck) isMaintenanceActiveForClient(req *http.Request) bool 
 
 func (m *MaintenanceCheck) sendBlockedPreflightResponse(rw http.ResponseWriter) {
 	if m.debug {
-		fmt.Fprintf(os.Stdout, "[MaintenanceCheck] CORS preflight blocked due to maintenance mode\n")
+		fmt.Fprintf(os.Stdout, "[MaintenanceCheck] CORS preflight completed, but actual request will be blocked due to maintenance mode\n")
 	}
 
-	rw.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	rw.WriteHeader(m.maintenanceStatusCode)
-	_, _ = rw.Write([]byte("Service is in maintenance mode"))
+	// Preflight must always return 2xx status according to CORS spec
+	rw.WriteHeader(http.StatusOK)
 }
 
 func (m *MaintenanceCheck) sendSuccessfulPreflightResponse(rw http.ResponseWriter) {

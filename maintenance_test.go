@@ -1416,12 +1416,12 @@ func TestCORSFunctionalityDuringMaintenance(t *testing.T) {
 			method:              http.MethodOptions,
 			origin:              "https://citronus.pro",
 			clientIP:            "10.0.0.1",
-			expectedStatusCode:  512,
+			expectedStatusCode:  http.StatusOK, // Preflight should return 200 even when blocked
 			expectedCORSOrigin:  "https://citronus.pro",
 			expectedCORSMethods: "GET, POST, PUT, DELETE, OPTIONS",
 			expectedCORSHeaders: "Accept, Authorization, Content-Type, X-CSRF-Token",
 			expectedCORSMaxAge:  "86400",
-			description:         "Should handle CORS preflight but block due to maintenance and no whitelist",
+			description:         "Should handle CORS preflight with 200 status, actual request will be blocked",
 		},
 		{
 			name:                "CORS preflight - maintenance active, allowed IP",
@@ -1477,8 +1477,8 @@ func TestCORSFunctionalityDuringMaintenance(t *testing.T) {
 			method:             http.MethodOptions,
 			origin:             "", // No origin
 			clientIP:           "10.0.0.1",
-			expectedStatusCode: 512, // Still blocked due to maintenance
-			description:        "Should handle preflight without origin but still apply maintenance rules",
+			expectedStatusCode: http.StatusOK, // Should pass to backend when no origin
+			description:        "Should pass OPTIONS to backend when no origin header is present",
 		},
 	}
 
@@ -1564,8 +1564,8 @@ func TestCORSFunctionalityDuringMaintenance(t *testing.T) {
 				}
 			}
 
-			// For maintenance responses, check that credentials are allowed (only if origin was present)
-			if tt.expectedStatusCode == 512 && tt.expectedCORSOrigin != "" {
+			// For responses with CORS headers, check that credentials are allowed (only if origin was present)
+			if tt.expectedCORSOrigin != "" && (tt.expectedStatusCode == 512 || tt.method == http.MethodOptions) {
 				credentialsAllowed := response.Header.Get("Access-Control-Allow-Credentials")
 				if credentialsAllowed != "true" {
 					t.Errorf("%s: Expected Access-Control-Allow-Credentials 'true', got '%s'", tt.description, credentialsAllowed)
