@@ -199,7 +199,7 @@ func ensureSharedCacheInitialized(environmentEndpoints map[string]string, enviro
 		if firstEnv {
 			// Load the first environment synchronously
 			retryDelay := 100 * time.Millisecond
-			for range 5 {
+			for i := 0; i < 5; i++ {
 				if refreshMaintenanceStatusForEnvironment(envSuffix) {
 					break
 				}
@@ -214,7 +214,7 @@ func ensureSharedCacheInitialized(environmentEndpoints map[string]string, enviro
 		} else {
 			go func(env string) {
 				retryDelay := 100 * time.Millisecond
-				for range 5 {
+				for i := 0; i < 5; i++ {
 					if refreshMaintenanceStatusForEnvironment(env) {
 						break
 					}
