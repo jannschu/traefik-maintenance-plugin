@@ -55,7 +55,7 @@ func CreateConfig() *Config {
 		SkipPrefixes:            []string{},
 		SkipHosts:               []string{},
 		RequestTimeoutInSeconds: 5,
-		MaintenanceStatusCode:   512,
+		MaintenanceStatusCode:   503,
 		Debug:                   false,
 	}
 }

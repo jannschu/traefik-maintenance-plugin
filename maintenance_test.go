@@ -91,7 +91,7 @@ func TestMaintenanceCheck(t *testing.T) {
 			urlPath:                 "/",
 			skipPrefixes:            []string{},
 			skipHosts:               []string{},
-			maintenanceStatusCode:   512,
+			maintenanceStatusCode:   503,
 			expectedCode:            http.StatusOK,
 			description:             "When maintenance is inactive, all requests should be allowed",
 		},
@@ -104,8 +104,8 @@ func TestMaintenanceCheck(t *testing.T) {
 			urlPath:                 "/",
 			skipPrefixes:            []string{},
 			skipHosts:               []string{},
-			maintenanceStatusCode:   512,
-			expectedCode:            512,
+			maintenanceStatusCode:   503,
+			expectedCode:            503,
 			description:             "When maintenance is active with no whitelist, all requests should be blocked",
 		},
 		{
@@ -130,8 +130,8 @@ func TestMaintenanceCheck(t *testing.T) {
 			urlPath:                 "/",
 			skipPrefixes:            []string{},
 			skipHosts:               []string{},
-			maintenanceStatusCode:   512,
-			expectedCode:            512,
+			maintenanceStatusCode:   503,
+			expectedCode:            503,
 			description:             "When maintenance is active and client IP is not in whitelist, request should be blocked",
 		},
 		{
@@ -143,7 +143,7 @@ func TestMaintenanceCheck(t *testing.T) {
 			urlPath:                 "/",
 			skipPrefixes:            []string{},
 			skipHosts:               []string{},
-			maintenanceStatusCode:   512,
+			maintenanceStatusCode:   503,
 			expectedCode:            http.StatusOK,
 			description:             "When maintenance is active and client IP is in whitelist, request should be allowed",
 		},
@@ -156,7 +156,7 @@ func TestMaintenanceCheck(t *testing.T) {
 			urlPath:                 "/",
 			skipPrefixes:            []string{},
 			skipHosts:               []string{},
-			maintenanceStatusCode:   512,
+			maintenanceStatusCode:   503,
 			expectedCode:            http.StatusOK,
 			description:             "When maintenance is active with wildcard whitelist, all requests should be allowed",
 		},
@@ -169,7 +169,7 @@ func TestMaintenanceCheck(t *testing.T) {
 			urlPath:                 "/admin/dashboard",
 			skipPrefixes:            []string{"/admin"},
 			skipHosts:               []string{},
-			maintenanceStatusCode:   512,
+			maintenanceStatusCode:   503,
 			expectedCode:            http.StatusOK,
 			description:             "When maintenance is active but URL matches skip prefix, request should be allowed",
 		},
@@ -182,7 +182,7 @@ func TestMaintenanceCheck(t *testing.T) {
 			urlPath:                 "/pgadmin/login",
 			skipPrefixes:            []string{"/admin", "/pgadmin"},
 			skipHosts:               []string{},
-			maintenanceStatusCode:   512,
+			maintenanceStatusCode:   503,
 			expectedCode:            http.StatusOK,
 			description:             "When maintenance is active but URL matches one of multiple skip prefixes, request should be allowed",
 		},
@@ -195,8 +195,8 @@ func TestMaintenanceCheck(t *testing.T) {
 			urlPath:                 "/app/user/profile",
 			skipPrefixes:            []string{"/admin", "/pgadmin"},
 			skipHosts:               []string{},
-			maintenanceStatusCode:   512,
-			expectedCode:            512,
+			maintenanceStatusCode:   503,
+			expectedCode:            503,
 			description:             "When maintenance is active and URL doesn't match any skip prefix, request should be blocked",
 		},
 		{
@@ -209,7 +209,7 @@ func TestMaintenanceCheck(t *testing.T) {
 			skipPrefixes:            []string{},
 			skipHosts:               []string{"test.example.com"},
 			host:                    "test.example.com",
-			maintenanceStatusCode:   512,
+			maintenanceStatusCode:   503,
 			expectedCode:            http.StatusOK,
 			description:             "When maintenance is active but host matches skip host, request should be allowed",
 		},
@@ -223,7 +223,7 @@ func TestMaintenanceCheck(t *testing.T) {
 			skipPrefixes:            []string{},
 			skipHosts:               []string{"test.example.com"},
 			host:                    "test.example.com:8080",
-			maintenanceStatusCode:   512,
+			maintenanceStatusCode:   503,
 			expectedCode:            http.StatusOK,
 			description:             "When maintenance is active but host with port matches skip host, request should be allowed",
 		},
@@ -237,7 +237,7 @@ func TestMaintenanceCheck(t *testing.T) {
 			skipPrefixes:            []string{},
 			skipHosts:               []string{"*.example.com"},
 			host:                    "sub.example.com",
-			maintenanceStatusCode:   512,
+			maintenanceStatusCode:   503,
 			expectedCode:            http.StatusOK,
 			description:             "When maintenance is active but host matches wildcard skip host, request should be allowed",
 		},
@@ -1457,7 +1457,7 @@ func TestCORSFunctionalityDuringMaintenance(t *testing.T) {
 			method:              http.MethodGet,
 			origin:              "https://citronus.pro",
 			clientIP:            "10.0.0.1",
-			expectedStatusCode:  512, // Maintenance status code
+			expectedStatusCode:  503, // Maintenance status code
 			expectedCORSOrigin:  "https://citronus.pro",
 			expectedCORSMethods: "GET, POST, PUT, DELETE, OPTIONS",
 			expectedCORSHeaders: "Accept, Authorization, Content-Type, X-CSRF-Token",
@@ -1494,7 +1494,7 @@ func TestCORSFunctionalityDuringMaintenance(t *testing.T) {
 			cfg.EnvironmentEndpoints = map[string]string{"": tt.endpoint}
 			cfg.CacheDurationInSeconds = 10
 			cfg.RequestTimeoutInSeconds = 5
-			cfg.MaintenanceStatusCode = 512
+			cfg.MaintenanceStatusCode = 503
 			cfg.Debug = false
 
 			next := http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
@@ -1567,7 +1567,7 @@ func TestCORSFunctionalityDuringMaintenance(t *testing.T) {
 			}
 
 			// For responses with CORS headers, check that credentials are allowed (only if origin was present)
-			if tt.expectedCORSOrigin != "" && (tt.expectedStatusCode == 512 || tt.method == http.MethodOptions) {
+			if tt.expectedCORSOrigin != "" && (tt.expectedStatusCode == 503 || tt.method == http.MethodOptions) {
 				credentialsAllowed := response.Header.Get("Access-Control-Allow-Credentials")
 				if credentialsAllowed != "true" {
 					t.Errorf("%s: Expected Access-Control-Allow-Credentials 'true', got '%s'", tt.description, credentialsAllowed)
@@ -1575,7 +1575,7 @@ func TestCORSFunctionalityDuringMaintenance(t *testing.T) {
 			}
 
 			// Verify content type for all maintenance responses (both with and without origin)
-			if tt.expectedStatusCode == 512 {
+			if tt.expectedStatusCode == 503 {
 				contentType := response.Header.Get("Content-Type")
 				if contentType != "text/plain; charset=utf-8" {
 					t.Errorf("%s: Expected content type 'text/plain; charset=utf-8', got '%s'", tt.description, contentType)
@@ -1638,7 +1638,7 @@ func TestProductionComDomainSupport(t *testing.T) {
 			},
 			testDomain:     "portal.citronus.com",
 			clientIP:       "10.0.0.1", // Not in whitelist
-			expectedStatus: 512,
+			expectedStatus: 503,
 			description:    "Should route .com domain to custom production endpoint and block non-whitelisted IP",
 		},
 		{
@@ -1676,7 +1676,7 @@ func TestProductionComDomainSupport(t *testing.T) {
 			cfg.EnvironmentEndpoints = tt.customEndpoints
 			cfg.CacheDurationInSeconds = 10
 			cfg.RequestTimeoutInSeconds = 5
-			cfg.MaintenanceStatusCode = 512
+			cfg.MaintenanceStatusCode = 503
 			cfg.Debug = false
 
 			next := http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
