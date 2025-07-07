@@ -204,9 +204,9 @@ func ensureSharedCacheInitialized(environmentEndpoints map[string]string, enviro
 	firstEnv := true
 	for envSuffix := range environmentEndpoints {
 		if firstEnv {
-			// Первую среду загружаем синхронно
-			var retryDelay time.Duration = 100 * time.Millisecond
-			for i := 0; i < 5; i++ {
+			// Load the first environment synchronously
+			retryDelay := 100 * time.Millisecond
+			for range 5 {
 				if refreshMaintenanceStatusForEnvironment(envSuffix) {
 					break
 				}
@@ -220,8 +220,8 @@ func ensureSharedCacheInitialized(environmentEndpoints map[string]string, enviro
 			firstEnv = false
 		} else {
 			go func(env string) {
-				var retryDelay time.Duration = 100 * time.Millisecond
-				for i := 0; i < 5; i++ {
+				retryDelay := 100 * time.Millisecond
+				for range 5 {
 					if refreshMaintenanceStatusForEnvironment(env) {
 						break
 					}
@@ -433,9 +433,6 @@ func refreshMaintenanceStatusForEnvironment(envSuffix string) bool {
 	isActive := result.SystemConfig.Maintenance.IsActive
 	whitelist := result.SystemConfig.Maintenance.Whitelist
 
-	whitelistCopy := make([]string, len(whitelist))
-	copy(whitelistCopy, whitelist)
-
 	updateEnvironmentCache(envSuffix, &MaintenanceResponse{result.SystemConfig}, cacheDuration, 0, true)
 
 	if debug {
@@ -461,9 +458,8 @@ func updateEnvironmentCache(envSuffix string, result *MaintenanceResponse, durat
 	}
 
 	if success && result != nil {
-		envCache.isActive = result.SystemConfig.Maintenance.IsActive
-		envCache.whitelist = make([]string, len(result.SystemConfig.Maintenance.Whitelist))
-		copy(envCache.whitelist, result.SystemConfig.Maintenance.Whitelist)
+		envCache.isActive = result.IsActive
+		envCache.whitelist = append([]string{}, result.Whitelist...) // Ensure we have a copy
 		envCache.expiry = time.Now().Add(duration)
 		envCache.failedAttempts = 0
 		envCache.lastSuccessfulFetch = time.Now()
@@ -506,14 +502,8 @@ func getMaintenanceStatusForDomain(domain string) (bool, []string) {
 			envSuffix, domain, envCache.isActive, len(envCache.whitelist))
 	}
 
-	whitelistCopy := make([]string, len(envCache.whitelist))
-	copy(whitelistCopy, envCache.whitelist)
-
+	whitelistCopy := append([]string(nil), envCache.whitelist...)
 	return envCache.isActive, whitelistCopy
-}
-
-func getMaintenanceStatus() (bool, []string) {
-	return false, []string{}
 }
 
 // calculateBackoff returns an exponential backoff duration with jitter
@@ -599,8 +589,8 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 	skipPrefixesCopy := make([]string, len(config.SkipPrefixes))
 	copy(skipPrefixesCopy, config.SkipPrefixes)
 
-	skipHostsCopy := make([]string, len(config.SkipHosts))
-	copy(skipHostsCopy, config.SkipHosts)
+	skipPrefixesCopy := append([]string{}, config.SkipPrefixes...)
+	skipHostsCopy := append([]string{}, config.SkipHosts...)
 
 	m := &MaintenanceCheck{
 		next:                  next,
@@ -834,8 +824,8 @@ func getClientIP(req *http.Request, debug bool) string {
 				// Forwarded: for=192.0.2.60;proto=http;by=203.0.113.43
 				parts := strings.Split(addresses, ";")
 				for _, part := range parts {
-					if strings.HasPrefix(part, "for=") {
-						ip := strings.TrimPrefix(part, "for=")
+					if after, ok := strings.CutPrefix(part, "for="); ok {
+						ip := after
 						// Remove possible port and IPv6
 						ip = strings.TrimSuffix(strings.TrimPrefix(ip, "["), "]")
 						if idx := strings.LastIndex(ip, ":"); idx != -1 {
@@ -903,13 +893,11 @@ func (m *MaintenanceCheck) isClientAllowed(req *http.Request, whitelist []string
 		}
 	}
 
-	for _, entry := range whitelist {
-		if entry == "*" {
-			if m.debug {
-				fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Wildcard (*) found in whitelist, allowing request\n")
-			}
-			return true
+	if slices.Contains(whitelist, "*") {
+		if m.debug {
+			fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Wildcard (*) found in whitelist, allowing request\n")
 		}
+		return true
 	}
 
 	clientIP := getClientIP(req, m.debug)
