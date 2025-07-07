@@ -1,8 +1,8 @@
 {
   "name": "traefik-maintenance-plugin",
-  "version": "v0.1.0",
+  "version": "v0.2.0",
   "description": "A middleware plugin for Traefik that blocks requests during maintenance mode.",
-  "modulename": "github.com/CitronusAcademy/traefik-maintenance-plugin",
+  "modulename": "github.com/jannschu/traefik-maintenance-plugin",
   "license": "MIT",
   "author": "Citronus"
 }
