@@ -2,12 +2,12 @@ displayName: Maintenance Mode Plugin
 
 type: middleware
 
-import: github.com/CitronusAcademy/traefik-maintenance-plugin
+import: github.com/jannschu/traefik-maintenance-plugin
 
 summary: "A middleware that checks if a service is in maintenance mode and returns an appropriate status code"
 
 testData:
-  endpoint: "https://api.citronus.pro/admin/api/system-config/?format=json"
+  endpoint: "file:///etc/maintenance.json"
   cacheDurationInSeconds: 10
   requestTimeoutInSeconds: 5
   maintenanceStatusCode: 512
