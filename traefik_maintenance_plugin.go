@@ -4,13 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math/rand"
 	"net"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/rickb777/accept"
 )
 
 // Initialize random source for jitter calculations
@@ -30,6 +34,7 @@ type Config struct {
 	Debug                   bool                         `json:"debug,omitempty"`
 	SecretHeader            string                       `json:"secretHeader,omitempty"`
 	SecretHeaderValue       string                       `json:"secretHeaderValue,omitempty"`
+	Content                 string                       `json:"content,omitempty"`
 }
 
 type EnvironmentSecret struct {
@@ -39,34 +44,21 @@ type EnvironmentSecret struct {
 
 func CreateConfig() *Config {
 	return &Config{
-		EnvironmentEndpoints: map[string]string{
-			".com":   "http://admin-service.admin/admin/api/system-config/?format=json",
-			".world": "http://admin-service.stage-admin/admin/api/system-config/?format=json",
-			".pro":   "http://admin-service.develop-admin/admin/api/system-config/?format=json",
-			"":       "http://admin-service.admin/admin/api/system-config/?format=json",
-		},
-		EnvironmentSecrets: map[string]EnvironmentSecret{
-			".com":   {Header: "X-Plugin-Secret", Value: ""},
-			".world": {Header: "X-Plugin-Secret", Value: ""},
-			".pro":   {Header: "X-Plugin-Secret", Value: ""},
-			"":       {Header: "X-Plugin-Secret", Value: ""},
-		},
+		EnvironmentEndpoints:    map[string]string{},
+		EnvironmentSecrets:      map[string]EnvironmentSecret{},
 		CacheDurationInSeconds:  10,
 		SkipPrefixes:            []string{},
 		SkipHosts:               []string{},
 		RequestTimeoutInSeconds: 5,
 		MaintenanceStatusCode:   503,
 		Debug:                   false,
+		Content:                 "",
 	}
 }
 
-type MaintenanceResponse struct {
-	SystemConfig struct {
-		Maintenance struct {
-			IsActive  bool     `json:"is_active"`
-			Whitelist []string `json:"whitelist"`
-		} `json:"maintenance"`
-	} `json:"system_config"`
+type MaintenanceStatus struct {
+	IsActive  bool     `json:"is_active"`
+	Whitelist []string `json:"whitelist"`
 }
 
 type EnvironmentCache struct {
@@ -106,6 +98,7 @@ type MaintenanceCheck struct {
 	skipHosts             []string
 	maintenanceStatusCode int
 	debug                 bool
+	content               string
 }
 
 func ensureSharedCacheInitialized(environmentEndpoints map[string]string, environmentSecrets map[string]EnvironmentSecret, cacheDuration, requestTimeout time.Duration, debug bool, userAgent string, secretHeader, secretHeaderValue string) {
@@ -341,109 +334,173 @@ func refreshMaintenanceStatusForEnvironment(envSuffix string) bool {
 
 	endpoint := getEndpointForDomain(envSuffix)
 
+	if endpoint == "" {
+		if debug {
+			fmt.Fprintf(os.Stdout, "[MaintenanceCheck] No endpoint found for environment '%s', skipping maintenance check\n", envSuffix)
+		}
+		result := MaintenanceStatus{
+			IsActive:  false,
+			Whitelist: []string{},
+		}
+		updateEnvironmentCache(envSuffix, &result, cacheDuration, 0, true)
+		return true
+	}
+
 	if debug {
 		fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Fetching maintenance status from '%s' for environment '%s'\n", endpoint, envSuffix)
 	}
 
-	if client == nil {
-		if debug {
-			fmt.Fprintf(os.Stdout, "[MaintenanceCheck] HTTP client is nil, skipping refresh\n")
-		}
-		return false
-	}
+	var result MaintenanceStatus
 
-	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		if debug {
-			fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Error creating request: %v\n", err)
-		}
-
-		backoffTime := calculateBackoff(currentFailedAttempts)
-		updateEnvironmentCache(envSuffix, nil, backoffTime, currentFailedAttempts+1, false)
-		return false
-	}
-
-	req.Header.Set("User-Agent", userAgent)
-
-	if secretHeader != "" && secretHeaderValue != "" {
-		req.Header.Set(secretHeader, secretHeaderValue)
-		if debug {
-			fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Added secret header '%s' for environment '%s'\n", secretHeader, envSuffix)
-		}
-	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		if debug {
-			fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Error making request: %v\n", err)
-		}
-
-		backoffTime := calculateBackoff(currentFailedAttempts)
-		updateEnvironmentCache(envSuffix, nil, backoffTime, currentFailedAttempts+1, false)
-		return false
-	}
-
-	if resp != nil && resp.Body != nil {
-		defer func() {
-			err := resp.Body.Close()
-			if err != nil && debug {
-				fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Error closing response body: %v\n", err)
+	// Is endpoint a local file?
+	if after, ok := strings.CutPrefix(endpoint, "file://"); ok {
+		filePath := after
+		// Check if path exists
+		if _, err := os.Stat(filePath); os.IsNotExist(err) {
+			if debug {
+				fmt.Fprintf(os.Stdout, "[MaintenanceCheck] File '%s' does not exist, skipping maintenance check\n", filePath)
 			}
-		}()
-	}
-
-	if resp == nil {
-		if debug {
-			fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Nil response received\n")
+			result = MaintenanceStatus{
+				IsActive:  false,
+				Whitelist: []string{},
+			}
+		} else {
+			file, err := os.Open(filePath)
+			if err != nil {
+				if debug {
+					fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Error reading file: %v\n", err)
+				}
+				backoffTime := calculateBackoff(currentFailedAttempts)
+				updateEnvironmentCache(envSuffix, nil, backoffTime, currentFailedAttempts+1, false)
+				return false
+			} else {
+				var status MaintenanceStatus
+				decoder := json.NewDecoder(file)
+				if err := decoder.Decode(&status); err != nil {
+					if debug {
+						fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Error parsing JSON: %v\n", err)
+					}
+					backoffTime := calculateBackoff(currentFailedAttempts)
+					updateEnvironmentCache(envSuffix, nil, backoffTime, currentFailedAttempts+1, false)
+					return false
+				}
+				result = MaintenanceStatus{
+					IsActive:  status.IsActive,
+					Whitelist: status.Whitelist,
+				}
+			}
+		}
+	} else {
+		if client == nil {
+			if debug {
+				fmt.Fprintf(os.Stdout, "[MaintenanceCheck] HTTP client is nil, skipping refresh\n")
+			}
+			return false
 		}
 
-		backoffTime := calculateBackoff(currentFailedAttempts)
-		updateEnvironmentCache(envSuffix, nil, backoffTime, currentFailedAttempts+1, false)
-		return false
-	}
+		ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+		defer cancel()
 
-	if resp.StatusCode != http.StatusOK {
-		if debug {
-			fmt.Fprintf(os.Stdout, "[MaintenanceCheck] API returned status code: %d\n", resp.StatusCode)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+		if err != nil {
+			if debug {
+				fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Error creating request: %v\n", err)
+			}
+
+			backoffTime := calculateBackoff(currentFailedAttempts)
+			updateEnvironmentCache(envSuffix, nil, backoffTime, currentFailedAttempts+1, false)
+			return false
 		}
 
-		backoffTime := calculateBackoff(currentFailedAttempts)
-		updateEnvironmentCache(envSuffix, nil, backoffTime, currentFailedAttempts+1, false)
-		return false
-	}
+		req.Header.Set("User-Agent", userAgent)
 
-	const maxResponseSize = 10 * 1024 * 1024
-	limitedReader := http.MaxBytesReader(nil, resp.Body, maxResponseSize)
-
-	var result MaintenanceResponse
-	decoder := json.NewDecoder(limitedReader)
-	if err := decoder.Decode(&result); err != nil {
-		if debug {
-			fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Error parsing JSON: %v\n", err)
+		if secretHeader != "" && secretHeaderValue != "" {
+			req.Header.Set(secretHeader, secretHeaderValue)
+			if debug {
+				fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Added secret header '%s' for environment '%s'\n", secretHeader, envSuffix)
+			}
 		}
 
-		backoffTime := calculateBackoff(currentFailedAttempts)
-		updateEnvironmentCache(envSuffix, nil, backoffTime, currentFailedAttempts+1, false)
-		return false
+		resp, err := client.Do(req)
+		if err != nil {
+			if debug {
+				fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Error making request: %v\n", err)
+			}
+
+			backoffTime := calculateBackoff(currentFailedAttempts)
+			updateEnvironmentCache(envSuffix, nil, backoffTime, currentFailedAttempts+1, false)
+			return false
+		}
+
+		if resp != nil && resp.Body != nil {
+			defer func() {
+				err := resp.Body.Close()
+				if err != nil && debug {
+					fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Error closing response body: %v\n", err)
+				}
+			}()
+		}
+
+		if resp == nil {
+			if debug {
+				fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Nil response received\n")
+			}
+
+			backoffTime := calculateBackoff(currentFailedAttempts)
+			updateEnvironmentCache(envSuffix, nil, backoffTime, currentFailedAttempts+1, false)
+			return false
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			if debug {
+				fmt.Fprintf(os.Stdout, "[MaintenanceCheck] API returned status code: %d\n", resp.StatusCode)
+			}
+
+			backoffTime := calculateBackoff(currentFailedAttempts)
+			updateEnvironmentCache(envSuffix, nil, backoffTime, currentFailedAttempts+1, false)
+			return false
+		}
+
+		const maxResponseSize = 10 * 1024 * 1024
+		limitedReader := http.MaxBytesReader(nil, resp.Body, maxResponseSize)
+
+		type MaintenanceResponse struct {
+			SystemConfig struct {
+				Maintenance struct {
+					IsActive  bool     `json:"is_active"`
+					Whitelist []string `json:"whitelist"`
+				} `json:"maintenance"`
+			} `json:"system_config"`
+		}
+		var maintenanceResponse MaintenanceResponse
+		decoder := json.NewDecoder(limitedReader)
+		if err := decoder.Decode(&maintenanceResponse); err != nil {
+			if debug {
+				fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Error parsing JSON: %v\n", err)
+			}
+
+			backoffTime := calculateBackoff(currentFailedAttempts)
+			updateEnvironmentCache(envSuffix, nil, backoffTime, currentFailedAttempts+1, false)
+			return false
+		}
+
+		result = MaintenanceStatus{
+			IsActive:  maintenanceResponse.SystemConfig.Maintenance.IsActive,
+			Whitelist: maintenanceResponse.SystemConfig.Maintenance.Whitelist,
+		}
 	}
 
-	isActive := result.SystemConfig.Maintenance.IsActive
-	whitelist := result.SystemConfig.Maintenance.Whitelist
-
-	updateEnvironmentCache(envSuffix, &MaintenanceResponse{result.SystemConfig}, cacheDuration, 0, true)
+	updateEnvironmentCache(envSuffix, &result, cacheDuration, 0, true)
 
 	if debug {
 		fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Successfully updated maintenance status for environment '%s': active=%v, whitelist count=%d\n",
-			envSuffix, isActive, len(whitelist))
+			envSuffix, result.IsActive, len(result.Whitelist))
 	}
 
 	return true
 }
 
-func updateEnvironmentCache(envSuffix string, result *MaintenanceResponse, duration time.Duration, failedAttempts int, success bool) {
+func updateEnvironmentCache(envSuffix string, result *MaintenanceStatus, duration time.Duration, failedAttempts int, success bool) {
 	sharedCache.Lock()
 	defer sharedCache.Unlock()
 
@@ -553,7 +610,7 @@ func getEndpointForDomain(domain string) string {
 		return defaultEndpoint
 	}
 
-	return "http://admin-service.admin/admin/api/system-config/?format=json"
+	return ""
 }
 
 func New(ctx context.Context, next http.Handler, config *Config, name string) (http.Handler, error) {
@@ -574,20 +631,7 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 		requestTimeout = 5 * time.Second
 	}
 
-	environmentEndpoints := config.EnvironmentEndpoints
-	if len(environmentEndpoints) == 0 {
-		environmentEndpoints = map[string]string{
-			".com":   "http://admin-service.admin/admin/api/system-config/?format=json",
-			".world": "http://admin-service.stage-admin/admin/api/system-config/?format=json",
-			".pro":   "http://admin-service.develop-admin/admin/api/system-config/?format=json",
-			"":       "http://admin-service.admin/admin/api/system-config/?format=json",
-		}
-	}
-
-	ensureSharedCacheInitialized(environmentEndpoints, config.EnvironmentSecrets, cacheDuration, requestTimeout, config.Debug, userAgent, config.SecretHeader, config.SecretHeaderValue)
-
-	skipPrefixesCopy := make([]string, len(config.SkipPrefixes))
-	copy(skipPrefixesCopy, config.SkipPrefixes)
+	ensureSharedCacheInitialized(config.EnvironmentEndpoints, config.EnvironmentSecrets, cacheDuration, requestTimeout, config.Debug, userAgent, config.SecretHeader, config.SecretHeaderValue)
 
 	skipPrefixesCopy := append([]string{}, config.SkipPrefixes...)
 	skipHostsCopy := append([]string{}, config.SkipHosts...)
@@ -598,6 +642,7 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 		skipHosts:             skipHostsCopy,
 		maintenanceStatusCode: config.MaintenanceStatusCode,
 		debug:                 config.Debug,
+		content:               config.Content,
 	}
 
 	go func() {
@@ -758,9 +803,59 @@ func (m *MaintenanceCheck) sendMaintenanceResponseWithCORS(rw http.ResponseWrite
 
 	m.addCORSHeadersToMaintenanceResponse(rw, req)
 
+	if m.content != "" {
+		if m.debug {
+			fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Probing custom maintenance content from '%s'\n", m.content)
+		}
+		acceptHeader := req.Header.Get("Accept")
+		accept, err := accept.Parse(acceptHeader)
+		if err != nil {
+			if m.debug {
+				fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Error parsing Accept header: %v\n", err)
+			}
+		} else {
+			send := func(mime string, ext string) bool {
+				if !accept.Accepts(mime) {
+					return false
+				}
+				file, err := os.Open(m.content + ext)
+				if err != nil {
+					return false
+				}
+				rw.Header().Set("Content-Type", mime)
+				rw.WriteHeader(m.maintenanceStatusCode)
+				_, err = io.Copy(rw, file)
+				if err != nil && m.debug {
+					fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Error sending maintenance content: %v\n", err)
+				}
+				// even in case of error we still want to return true
+				// another try should not be made
+				return true
+			}
+			types := []struct {
+				mime string
+				ext  string
+			}{
+				{"text/html", ".html"},
+				{"application/json", ".json"},
+				{"text/plain", ".txt"},
+			}
+			for _, t := range types {
+				if send(t.mime, t.ext) {
+					return
+				}
+			}
+		}
+	}
+	if m.debug {
+		fmt.Fprintf(os.Stdout, "[MaintenanceCheck] No custom maintenance content found, sending default response\n")
+	}
 	rw.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	rw.WriteHeader(m.maintenanceStatusCode)
-	_, _ = rw.Write([]byte("Service is in maintenance mode"))
+	_, err := rw.Write([]byte("Service is in maintenance mode"))
+	if err != nil && m.debug {
+		fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Error writing maintenance response: %v\n", err)
+	}
 }
 
 func (m *MaintenanceCheck) addCORSHeadersToMaintenanceResponse(rw http.ResponseWriter, req *http.Request) {

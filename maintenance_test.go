@@ -1,17 +1,19 @@
 package traefik_maintenance_plugin_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	plugin "github.com/CitronusAcademy/traefik-maintenance-plugin"
+	plugin "github.com/jannschu/traefik-maintenance-plugin"
 )
 
 type maintenanceResponse struct {
@@ -292,6 +294,158 @@ func TestMaintenanceCheck(t *testing.T) {
 				t.Errorf("%s: Expected status code %d, got %d", tt.description, tt.expectedCode, response.StatusCode)
 			}
 		})
+	}
+}
+
+func TestCustomMaintenanceContent(t *testing.T) {
+	ts, _, activeEndpoint, _, _ := setupTestServer()
+	defer ts.Close()
+
+	tests := []struct {
+		name       string
+		accept     string
+		expect     string
+		createJSON bool
+	}{
+		{
+			name:       "HTML content",
+			accept:     "application/json, text/html",
+			expect:     "html",
+			createJSON: false,
+		},
+		{
+			name:       "JSON content",
+			accept:     "text/html, application/json",
+			expect:     "html",
+			createJSON: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			plugin.ResetSharedCacheForTesting()
+			time.Sleep(100 * time.Millisecond)
+
+			contentDir := t.TempDir()
+
+			contentFile := contentDir + "/maintenance.html"
+			contentData := []byte("<html><body><h1>Maintenance Mode</h1></body></html>")
+			if err := os.WriteFile(contentFile, contentData, 0644); err != nil {
+				t.Fatalf("Failed to write custom content file: %v", err)
+			}
+
+			contentJSON := []byte("{\"message\": \"Maintenance Mode\"}")
+			contentJSONFile := contentDir + "/maintenance.json"
+			if test.createJSON {
+				if err := os.WriteFile(contentJSONFile, contentJSON, 0644); err != nil {
+					t.Fatalf("Failed to write custom JSON content file: %v", err)
+				}
+			} else {
+				// Ensure the JSON file does not exist if not needed
+				os.Remove(contentJSONFile)
+			}
+
+			cfg := plugin.CreateConfig()
+			cfg.EnvironmentEndpoints = map[string]string{"": activeEndpoint}
+			cfg.Content = contentDir + "/maintenance"
+			cfg.MaintenanceStatusCode = 512
+
+			next := http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+				rw.WriteHeader(http.StatusOK)
+			})
+
+			handler, err := plugin.New(context.Background(), next, cfg, "custom-content-test")
+			if err != nil {
+				t.Fatalf("Error creating plugin: %v", err)
+			}
+
+			time.Sleep(200 * time.Millisecond)
+
+			req := httptest.NewRequest(http.MethodGet, "http://localhost/", nil)
+			req.Header.Set("Accept", test.accept)
+
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, req)
+
+			response := recorder.Result()
+			defer response.Body.Close()
+
+			if response.StatusCode != cfg.MaintenanceStatusCode {
+				t.Errorf("Expected status code %d, got %d", cfg.MaintenanceStatusCode, response.StatusCode)
+			}
+
+			contentType := response.Header.Get("Content-Type")
+			if test.expect == "html" {
+				if contentType != "text/html" {
+					t.Errorf("Expected Content-Type 'text/html', got '%s'", contentType)
+				}
+
+				body := recorder.Body.Bytes()
+				if !bytes.Equal(body, contentData) {
+					t.Errorf("Expected body to match custom content, got %s", body)
+				}
+			} else {
+				if contentType != "application/json" {
+					t.Errorf("Expected Content-Type 'application/json', got '%s'", contentType)
+				}
+				body := recorder.Body.Bytes()
+				if !bytes.Equal(body, contentJSON) {
+					t.Errorf("Expected body to match custom JSON content, got %s", body)
+				}
+			}
+		})
+	}
+}
+
+func TestFileEnvironemnt(t *testing.T) {
+	plugin.ResetSharedCacheForTesting()
+	time.Sleep(100 * time.Millisecond)
+
+	contentDir := t.TempDir()
+	environmentFile := contentDir + "/maintenance.json"
+	contentData := []byte(`{"is_active": true, "whitelist": []}`)
+	if err := os.WriteFile(environmentFile, contentData, 0644); err != nil {
+		t.Fatalf("Failed to write custom content file: %v", err)
+	}
+
+	cfg := plugin.CreateConfig()
+	cfg.EnvironmentEndpoints = map[string]string{"": "file://" + environmentFile}
+	cfg.CacheDurationInSeconds = 1
+	next := http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		rw.WriteHeader(http.StatusOK)
+	})
+
+	handler, err := plugin.New(context.Background(), next, cfg, "custom-content-test")
+	if err != nil {
+		t.Fatalf("Error creating plugin: %v", err)
+	}
+
+	time.Sleep(200 * time.Millisecond)
+
+	req := httptest.NewRequest(http.MethodGet, "http://localhost/", nil)
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, req)
+
+	response := recorder.Result()
+	defer response.Body.Close()
+	if response.StatusCode != cfg.MaintenanceStatusCode {
+		t.Errorf("Expected status code %d, got %d", cfg.MaintenanceStatusCode, response.StatusCode)
+	}
+
+	contentData = []byte(`{"is_active": false, "whitelist": []}`)
+	if err := os.WriteFile(environmentFile, contentData, 0644); err != nil {
+		t.Fatalf("Failed to write updated custom content file: %v", err)
+	}
+	time.Sleep(time.Duration(2*cfg.CacheDurationInSeconds) * time.Second)
+
+	req = httptest.NewRequest(http.MethodGet, "http://localhost/", nil)
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, req)
+	response = recorder.Result()
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected status code %d after update, got %d", http.StatusOK, response.StatusCode)
 	}
 }
 
