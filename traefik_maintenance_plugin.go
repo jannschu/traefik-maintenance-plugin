@@ -129,6 +129,9 @@ func ensureSharedCacheInitialized(environmentEndpoints map[string]string, enviro
 
 	var wg sync.WaitGroup
 	if sharedCache.initialized && sharedCache.refresherRunning && sharedCache.stopCh != nil {
+		if sharedCache.debug {
+			fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Shared cache already initialized, stopping existing refresher\n")
+		}
 		wg.Add(1)
 		oldStopCh := sharedCache.stopCh
 
@@ -617,6 +620,11 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 	if config.MaintenanceStatusCode < 100 || config.MaintenanceStatusCode > 599 {
 		return nil, fmt.Errorf("invalid maintenance status code: %d (must be between 100-599)",
 			config.MaintenanceStatusCode)
+	}
+
+	if config.Debug {
+		fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Initializing MaintenanceCheck middleware with name '%s'\n", name)
+		fmt.Fprintf(os.Stdout, "[MaintenanceCheck] Configuration: %+v\n", config)
 	}
 
 	cacheDuration := time.Duration(config.CacheDurationInSeconds) * time.Second
